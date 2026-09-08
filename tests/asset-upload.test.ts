@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { saveAssetUpload } from '../lib/studio/asset-upload.ts';
+import { readImage } from '../lib/studio/openai-images.ts';
+import { validateAssetDesigns } from '../lib/studio/asset-design.ts';
+import { initialProduction } from '../lib/studio/graph.ts';
+import { demoPlan } from '../lib/studio/domain.ts';
+import type { Project } from '../lib/studio/types.ts';
+const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1sAAAAASUVORK5CYII=';
+void test('local uploads persist bytes, reject unsupported payloads and remain unapproved',async t=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'frame-upload-')),old=process.env.STUDIO_DATA_DIR;process.env.STUDIO_DATA_DIR=dir;t.after(()=>{if(old===undefined)delete process.env.STUDIO_DATA_DIR;else process.env.STUDIO_DATA_DIR=old;});
+ const uploaded=await saveAssetUpload(png);const id=uploaded.url.split('/').at(-1)!.split('.')[0];assert.equal((await readImage(id)).toString('base64'),png);
+ await assert.rejects(saveAssetUpload(Buffer.from('<svg onload="alert(1)"></svg>').toString('base64')),/不是支持/);
+ await assert.rejects(saveAssetUpload('A'.repeat(11_184_813)),/8 MB/);
+ const p:Project={id:'upload',revision:1,idea:'女孩',title:'test',createdAt:0,updatedAt:0,duration:12,ratio:'16:9',mode:'live',phase:'planned',questions:[],answers:{},jobs:[],production:initialProduction()};
+ p.production!.assets={bible:demoPlan(p).bible,seed:42,locked:false};p.production!.script={title:'test',logline:'女孩',synopsis:'女孩'};p.production!.node='assets';p.production!.library=validateAssetDesigns({assets:[{kind:'character',name:'女孩',evidence:'女孩',description:'黑发，蓝色校服',renderStyle:'photographic',colors:[],lighting:''}]},p);
+ await writeFile(path.join(dir,'projects.json'),JSON.stringify([p]));const {dispatch}=await import('../lib/studio/server.ts');
+ t.mock.method(globalThis,'fetch',()=>{throw new Error('Upload must not call a provider');});
+ const result=await dispatch({action:'asset_upload',id:p.id,revision:1,assetId:p.production!.library[0].id,imageBase64:png,filename:'../character.png'}) as Project;
+ const a=result.production!.library![0];assert.equal(a.status,'ready');assert.equal(a.approved,false);assert.equal(a.origin,'upload');assert.match(a.url!,/^\/api\/studio-images\//);assert.ok(!a.uploadedFilename!.includes('/'));
+ await assert.rejects(dispatch({action:'asset_upload',id:p.id,revision:1,assetId:a.id,imageBase64:png}),/新候选/);
+});
