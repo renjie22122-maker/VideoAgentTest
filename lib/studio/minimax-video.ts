@@ -1,3 +1,4 @@
+import { motionGuidance } from './motion.ts';
 import type { Project, Job } from './types.ts';
 import { readImage } from './openai-images.ts';
 type Request=(url:string,body:unknown,key:string,method?:string)=>Promise<Record<string,unknown>>;
@@ -9,7 +10,7 @@ export async function submitMiniMax(p:Project,j:Job,base:string,model:string,key
  let url=shot.referenceUrl;const match=/^\/api\/studio-images\/([a-f0-9-]{36})\.(png|jpg|webp)$/.exec(url);
  if(match)url='data:image/'+(match[2]==='jpg'?'jpeg':match[2])+';base64,'+(await readImage(match[1],match[2])).toString('base64');
  if(!url.startsWith('data:image/')&&!url.startsWith('https://'))throw new Error('分镜画面必须为公开 HTTPS 图片或本地已存图片。');
- const prompt=JSON.stringify({画面:shot.description,运镜:shot.camera,开始:shot.startState,结束:shot.endState,对白:shot.dialogue,声音:shot.sound,要求:'以输入图为首帧，单一连续镜头，不复制设定板布局；保持身份与道具结构，按时长完成动作。'});
+ const prompt=JSON.stringify({运动程序:motionGuidance(shot),画面:shot.description,运镜:shot.camera,开始:shot.startState,结束:shot.endState,对白:shot.dialogue,声音:shot.sound,要求:'以输入图为首帧，单一连续镜头，不复制设定板布局；保持身份与道具结构，按时长完成动作。'});
  if(prompt.length>7000)throw new Error('视频提示词超过 H3 的 7000 字限制，请精简镜头描述。');
  const input={model,content:[{type:'text',text:prompt},{type:'image_url',image_url:{url},role:'first_frame'}],duration:shot.duration,resolution:'768P',ratio:'adaptive'};
  const result=await request(base+'/v2/video_generation',input,key);

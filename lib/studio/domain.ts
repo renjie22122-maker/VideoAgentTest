@@ -1,3 +1,4 @@
+import { validateMotion, motionWarnings, motionGuidance } from './motion.ts';
 import type { Project, Plan, Shot, Issue, ContinuityState, Bible } from './types.ts';
 
 export function text(value: unknown, name: string, max=4000): string {
@@ -13,7 +14,7 @@ export function validateState(v:unknown):ContinuityState { const s=object(v);ret
 export function validateShot(v:unknown,index:number):Shot {
   const s=object(v),c=object(s.camera),start=object(c.start),end=object(c.end);
   const point=(p:Record<string,unknown>)=>({x:finite(p.x,-10,10,'相机 X'),y:finite(p.y,0.1,10,'相机高度'),z:finite(p.z,0.1,15,'相机距离')});
-  return {id:'shot-'+(index+1),scene:text(s.scene,'场景',100),title:text(s.title,'镜头标题',100),beat:text(s.beat,'叙事目的',1000),description:text(s.description,'画面',4000),dialogue:typeof s.dialogue==='string'?s.dialogue.slice(0,1000):'',sound:typeof s.sound==='string'?s.sound.slice(0,1000):'',duration:finite(s.duration,2,15,'镜头时长'),size:oneOf(s.size,['wide','medium','close'],'景别'),transition:oneOf(s.transition,['cut','dissolve'],'转场'),camera:{movement:oneOf(c.movement,['fixed','push','pull','track','orbit'],'运镜'),lens:finite(c.lens,18,135,'焦距'),start:point(start),end:point(end),easing:oneOf(c.easing,['linear','ease-in-out'],'缓动')},startState:validateState(s.startState),endState:validateState(s.endState)};
+  return {...(s.motion===undefined?{}:{motion:validateMotion(s.motion)}),id:'shot-'+(index+1),scene:text(s.scene,'场景',100),title:text(s.title,'镜头标题',100),beat:text(s.beat,'叙事目的',1000),description:text(s.description,'画面',4000),dialogue:typeof s.dialogue==='string'?s.dialogue.slice(0,1000):'',sound:typeof s.sound==='string'?s.sound.slice(0,1000):'',duration:finite(s.duration,2,15,'镜头时长'),size:oneOf(s.size,['wide','medium','close'],'景别'),transition:oneOf(s.transition,['cut','dissolve'],'转场'),camera:{movement:oneOf(c.movement,['fixed','push','pull','track','orbit'],'运镜'),lens:finite(c.lens,18,135,'焦距'),start:point(start),end:point(end),easing:oneOf(c.easing,['linear','ease-in-out'],'缓动')},startState:validateState(s.startState),endState:validateState(s.endState)};
 }
 export function validateBible(value:unknown):Bible {
  const raw=object(value),b=raw.bible&&typeof raw.bible==='object'?object(raw.bible):raw;
@@ -50,11 +51,12 @@ export function checkContinuity(plan:Plan, targetDuration?:number):Issue[] {
   const issues:Issue[]=[];const add=(s:Shot,code:string,message:string,level:Issue['level']='warning')=>issues.push({shotId:s.id,level,code,message});
   plan.shots.forEach((s,i)=>{
     const prev=plan.shots[i-1];
+    for(const message of motionWarnings(s))add(s,'motion-program',message);
     const spoken=s.dialogue.replace(/[\s\p{P}]/gu,'').length;
     if(spoken>s.duration*4)add(s,'dialogue-density','本镜对白约 '+spoken+' 字，仅 '+s.duration+' 秒；按每秒 3–4 字粗估需 '+Math.ceil(spoken/4)+'–'+Math.ceil(spoken/3)+' 秒，另需动作与停顿时间。请延长或跨镜分配对白。');
-    if(s.camera.movement==='fixed'&&JSON.stringify(s.camera.start)!==JSON.stringify(s.camera.end))add(s,'fixed-motion','固定镜头的起终点不同。','error');
-    if(s.camera.movement==='push'&&s.camera.end.z>=s.camera.start.z)add(s,'push-direction','推进镜头的终点应更接近主体。','error');
-    if(s.camera.movement==='pull'&&s.camera.end.z<=s.camera.start.z)add(s,'pull-direction','拉远镜头的终点应远离主体。','error');
+    if(!s.motion&&s.camera.movement==='fixed'&&JSON.stringify(s.camera.start)!==JSON.stringify(s.camera.end))add(s,'fixed-motion','固定镜头的起终点不同。','error');
+    if(!s.motion&&s.camera.movement==='push'&&s.camera.end.z>=s.camera.start.z)add(s,'push-direction','推进镜头的终点应更接近主体。','error');
+    if(!s.motion&&s.camera.movement==='pull'&&s.camera.end.z<=s.camera.start.z)add(s,'pull-direction','拉远镜头的终点应远离主体。','error');
     const distance=Math.hypot(s.camera.end.x-s.camera.start.x,s.camera.end.y-s.camera.start.y,s.camera.end.z-s.camera.start.z);
     if(distance/s.duration>2)add(s,'camera-speed','运镜速度较快，可能影响动作辨识。');
     if(s.camera.start.x*s.camera.end.x<0)add(s,'camera-axis','运镜路径穿过主体轴线，请确认空间关系。');
@@ -71,11 +73,11 @@ export function checkContinuity(plan:Plan, targetDuration?:number):Issue[] {
 }
 export function shotPrompt(p:Project,index:number):string {
   if(!p.plan)throw new Error('请先生成分镜。');const s=p.plan.shots[index];if(!s)throw new Error('镜头不存在。');
-  return JSON.stringify({task:'cinematic shot',aspectRatio:p.ratio,durationSeconds:s.duration,bible:p.plan.bible,shot:s.description,dialogue:s.dialogue,sound:s.sound,shotSize:s.size,camera:{...s.camera,units:'meters relative to subject; x lateral, y height, z distance; look at subject origin',note:'camera path is creative guidance, provider may not support exact trajectory'},startState:s.startState,endState:s.endState,previousEndState:index?p.plan.shots[index-1].endState:null,referenceImage:s.referenceUrl??null,previousReferenceImage:index?p.plan.shots[index-1].referenceUrl??null:null,transition:s.transition});
+  return JSON.stringify({motionPlan:motionGuidance(s),task:'cinematic shot',aspectRatio:p.ratio,durationSeconds:s.duration,bible:p.plan.bible,shot:s.description,dialogue:s.dialogue,sound:s.sound,shotSize:s.size,camera:{...s.camera,units:'meters relative to subject; x lateral, y height, z distance; look at subject origin',note:'camera path is creative guidance, provider may not support exact trajectory'},startState:s.startState,endState:s.endState,previousEndState:index?p.plan.shots[index-1].endState:null,referenceImage:s.referenceUrl??null,previousReferenceImage:index?p.plan.shots[index-1].referenceUrl??null:null,transition:s.transition});
 }
 export function invalidateFrom(p:Project,index:number):void {
   if(!p.plan)return;const ids=new Set(p.plan.shots.slice(index).map(s=>s.id));
-  for(const s of p.plan.shots.slice(index)){delete s.referenceUrl;delete s.videoUrl;delete s.referenceMode;delete s.videoMode;}
+  for(const s of p.plan.shots.slice(index)){delete s.referenceOrigin;delete s.referenceFilename;delete s.referenceUrl;delete s.videoUrl;delete s.referenceMode;delete s.videoMode;}
   p.jobs=p.jobs.map(j=>ids.has(j.shotId)&&j.status!=='cancelled'?{...j,status:'cancelled',error:'分镜已修改，输出失效，请重新生成。'}:j);
   p.revision++;
 }

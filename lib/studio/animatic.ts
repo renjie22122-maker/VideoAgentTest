@@ -1,5 +1,6 @@
+import { motionAt } from './motion.ts';
 import type { Project, Shot } from './types.ts';
-export function cameraPosition(s:Shot,t:number){const u=s.camera.easing==='ease-in-out'?t*t*(3-2*t):t;const a=s.camera.start,b=s.camera.end;if(t<=0)return {...a};if(t>=1)return {...b};if(s.camera.movement==='orbit'){const angleA=Math.atan2(a.x,a.z),angleB=Math.atan2(b.x,b.z),angle=angleA+(angleB-angleA)*u,radius=Math.hypot(a.x,a.z)+(Math.hypot(b.x,b.z)-Math.hypot(a.x,a.z))*u;return {x:Math.sin(angle)*radius,y:a.y+(b.y-a.y)*u,z:Math.cos(angle)*radius};}return {x:a.x+(b.x-a.x)*u,y:a.y+(b.y-a.y)*u,z:a.z+(b.z-a.z)*u};}
+export function cameraPosition(s:Shot,t:number){if(s.motion)return motionAt(s,t).camera;const u=s.camera.easing==='ease-in-out'?t*t*(3-2*t):t;const a=s.camera.start,b=s.camera.end;if(t<=0)return {...a};if(t>=1)return {...b};if(s.camera.movement==='orbit'){const angleA=Math.atan2(a.x,a.z),angleB=Math.atan2(b.x,b.z),angle=angleA+(angleB-angleA)*u,radius=Math.hypot(a.x,a.z)+(Math.hypot(b.x,b.z)-Math.hypot(a.x,a.z))*u;return {x:Math.sin(angle)*radius,y:a.y+(b.y-a.y)*u,z:Math.cos(angle)*radius};}return {x:a.x+(b.x-a.x)*u,y:a.y+(b.y-a.y)*u,z:a.z+(b.z-a.z)*u};}
 export function locateShot(shots:Shot[],seconds:number){let offset=0;for(let i=0;i<shots.length;i++){if(seconds<offset+shots[i].duration||i===shots.length-1)return {shot:shots[i],index:i,local:Math.min(1,Math.max(0,(seconds-offset)/shots[i].duration))};offset+=shots[i].duration;}throw new Error('没有分镜。');}
 function lines(ctx:CanvasRenderingContext2D,value:string,x:number,y:number,width:number,lineHeight:number,maxLines=3){let line='',row=0;for(const char of value){if(ctx.measureText(line+char).width>width){ctx.fillText(line,x,y+row*lineHeight);line='';row++;if(row>=maxLines)return;}line+=char;}ctx.fillText(line,x,y+row*lineHeight);}
 export function drawAnimatic(canvas:HTMLCanvasElement,p:Project,seconds:number){
@@ -7,7 +8,8 @@ export function drawAnimatic(canvas:HTMLCanvasElement,p:Project,seconds:number){
   const w=canvas.width,h=canvas.height,{shot:s,index,local}=locateShot(p.plan.shots,seconds),pos=cameraPosition(s,local);
   ctx.fillStyle='#14191c';ctx.fillRect(0,0,w,h);ctx.strokeStyle='#2d383e';ctx.lineWidth=1;
   for(let i=1;i<3;i++){ctx.beginPath();ctx.moveTo(w*i/3,0);ctx.lineTo(w*i/3,h);ctx.stroke();ctx.beginPath();ctx.moveTo(0,h*i/3);ctx.lineTo(w,h*i/3);ctx.stroke();}
-  const scale=Math.min(w,h)*.72/Math.max(1,pos.z),cx=w*.5-pos.x*w*.045,cy=h*.48+(pos.y-1.6)*h*.04;
+  const subject=s.motion?motionAt(s,local).subject:{x:0,y:0,z:0};
+  const scale=Math.min(w,h)*.72/Math.max(1,Math.abs(pos.z-subject.z)),cx=w*.5-(pos.x-subject.x)*w*.045,cy=h*.48+(pos.y-subject.y-1.6)*h*.04;
   ctx.fillStyle='#263329';ctx.strokeStyle='#d5f584';ctx.lineWidth=2;ctx.fillRect(cx-scale*.55,cy-scale*.65,scale*1.1,scale*1.3);ctx.strokeRect(cx-scale*.55,cy-scale*.65,scale*1.1,scale*1.3);
   ctx.fillStyle='#d5f584';ctx.font=Math.round(w*.02)+'px sans-serif';ctx.textAlign='center';ctx.fillText('主体构图区域',cx,cy);ctx.textAlign='left';
   ctx.fillStyle='#11171bdd';ctx.fillRect(0,0,w,h*.16);ctx.fillRect(0,h*.69,w,h*.31);

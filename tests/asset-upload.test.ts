@@ -22,4 +22,16 @@ void test('local uploads persist bytes, reject unsupported payloads and remain u
  const result=await dispatch({action:'asset_upload',id:p.id,revision:1,assetId:p.production!.library[0].id,imageBase64:png,filename:'../character.png'}) as Project;
  const a=result.production!.library![0];assert.equal(a.status,'ready');assert.equal(a.approved,false);assert.equal(a.origin,'upload');assert.match(a.url!,/^\/api\/studio-images\//);assert.ok(!a.uploadedFilename!.includes('/'));
  await assert.rejects(dispatch({action:'asset_upload',id:p.id,revision:1,assetId:a.id,imageBase64:png}),/新候选/);
+ result.plan=demoPlan(result);result.mode='demo';result.production!.node='storyboard';
+ result.plan.shots[1].referenceUrl='https://example.com/old.png';result.plan.shots[0].videoUrl='https://example.com/old.mp4';
+ await writeFile(path.join(dir,'projects.json'),JSON.stringify([result]));
+ const shot=await dispatch({action:'shot_image_upload',id:p.id,revision:result.revision,shotId:'shot-1',imageBase64:png,filename:'frame.png'}) as Project;
+ assert.match(shot.plan!.shots[0].referenceUrl!,/^\/api\/studio-images\//);assert.equal(shot.plan!.shots[0].referenceOrigin,'upload');
+ assert.equal(shot.plan!.shots[0].videoUrl,undefined);assert.equal(shot.plan!.shots[1].referenceUrl,undefined);
+ const preview=await dispatch({action:'shot_image_prompt',id:p.id,shotId:'shot-1'}) as {prompt:string};assert.ok(preview.prompt.length>0);
+ shot.production!.node='generation';shot.production!.renderApprovedRevision=shot.revision;await writeFile(path.join(dir,'projects.json'),JSON.stringify([shot]));
+ const queued=await dispatch({action:'enqueue',id:p.id,revision:shot.revision,kind:'image'}) as Project;
+ assert.ok(!queued.jobs.some(j=>j.shotId==='shot-1'&&j.kind==='image'));assert.ok(queued.jobs.length>0);
+ await assert.rejects(dispatch({action:'shot_image_upload',id:p.id,revision:queued.revision,shotId:'shot-1',imageBase64:png}),/生成队列/);
+
 });
