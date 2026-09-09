@@ -53,7 +53,7 @@ export function validateAutoDecision(
     reason: raw.reason,
   };
 }
-export async function autoStep(p: Project) {
+export async function autoStep(p: Project, assigned?: AutoDecision) {
   const run = p.production?.autoRun;
   if (!run || run.status !== 'running') throw new Error('自动运行未启动。');
   if (run.steps >= run.maxSteps) {
@@ -63,6 +63,7 @@ export async function autoStep(p: Project) {
   const roles = projectAgents(p).filter((r) => r.enabled),
     context = {
       instruction: run.instruction,
+      storyContext:p.storyContext,
       stage: p.production!.node,
       roles,
       allowedActions: autoActions,
@@ -74,6 +75,12 @@ export async function autoStep(p: Project) {
       scriptApproved: p.production!.scriptApproved,
       assets: p.production!.assets,
       library: p.production!.library?.map((a) => ({
+        id: a.id,
+        familyId: a.parentId ?? a.id,
+        version: a.version,
+        viewId: a.viewId,
+        costumeOf: a.costumeOf,
+        status: a.status,
         name: a.name,
         design: a.design,
         approved: a.approved,
@@ -86,10 +93,11 @@ export async function autoStep(p: Project) {
           r.revision === p.revision &&
           (r.configRevision ?? 0) === (p.production?.agentConfigRevision ?? 0),
       ),
+      continuityReview: p.production?.continuityReview?.revision === p.revision ? p.production.continuityReview : undefined,
       history: run.log,
     };
   const supervisor = roles.find((r) => r.id === 'producer');
-  const raw =
+  const raw = assigned ?? (
     p.mode === 'demo'
       ? {
           roleId: roles[0].id,
@@ -98,10 +106,10 @@ export async function autoStep(p: Project) {
         }
       : await roleJSON(
           '总 Agent 调度器',
-          '选择下一项最有价值的文本任务。返回 {roleId,action,reason}。review=部门会审；revise_shots=自动修正完整分镜；write_script=生成或修改剧本；design_assets=新增资产设计候选（不生图）；stop=无需继续。优先解决有证据的问题，不反复做同一任务。禁止生成图片、视频、启动队列或变更用户批准。剧本修改后必须停止等待人工确认。',
+          '选择下一项最有价值的文本任务。返回 {roleId,action,reason}。review=部门会审；revise_shots=自动修正完整分镜；write_script=生成或修改剧本；design_assets=新增资产设计候选（不生图）；stop=无需继续。同一资产多个候选且只有一个 approved=true 是正常版本管理，不是重复批准或连续性错误。按 familyId 和 viewId 区分主图、候选、细节及服装套组；retired 资产不参与当前判断。不得要求合并为批准版本或自行改变批准状态。design_assets 只能新增未批准设计候选，不能合并、删除或选择版本。优先解决有证据的问题，不反复做同一任务。禁止生成图片、视频、启动队列或变更用户批准。剧本修改后必须停止等待人工确认。',
           context,
           { model: supervisor?.model },
-        );
+        ));
   const decision = validateAutoDecision(raw, p),
     role = roles.find((r) => r.id === decision.roleId);
   run.steps++;
@@ -114,11 +122,11 @@ export async function autoStep(p: Project) {
       skillGuide('director', p) +
         DIRECTOR_SCHEMA +
         role!.checks +
-        ' 输出 {shots:[完整镜头结构]}，保持已确认剧本全部对白、剧情、场次与各场时长。只修复提供的具体问题，不编造 URL。',
+        ' 输出 {shots:[完整镜头结构]}，保持已确认剧本全部对白、剧情、场次与各场时长。逐项处理 continuityReview 的意见；不盲从建议，不删改对白，不修改剧本，可在同场内重新分配镜头时长。只修复有依据的问题，不编造 URL。',
       { ...context, currentPlan: p.plan, task: decision.reason },
       { model: role!.model },
     );
-    const plan = validateDirectorPlan(result, p);
+    const plan = validateDirectorPlan(result, p, true);
     const normalize = (v: string) => v.replace(/[\s\p{P}]/gu, '');
     const dialogue = p
       .production!.script?.scenes?.flatMap((s) => s.dialogue.map((d) => d.line))
@@ -129,6 +137,7 @@ export async function autoStep(p: Project) {
         normalize(dialogue)
     )
       throw new Error('自动分镜修改改变了已确认对白，已拒绝写入。');
+    for(const shot of plan.shots){const previous=p.plan?.shots.find(s=>s.id===shot.id&&s.scene===shot.scene);if(previous?.videoInput)shot.videoInput=previous.videoInput;}
     p.plan = plan;
     invalidateFrom(p, 0);
     reopenStoryboard(p);
@@ -199,7 +208,17 @@ export async function autoStep(p: Project) {
     at: Date.now(),
     role: role?.name ?? '总 Agent',
     action: decision.action,
-    message: decision.reason,
+    message: decision.reason + (decision.action === 'design_assets' ? '【实际结果：仅新增未批准的文字设计候选，未合并资产、未改变原批准版本、未生成图片。】' : ''),
   });
   if (run.steps >= run.maxSteps) run.status = 'completed';
+}
+
+export function continuityFixDecision(p: Project): AutoDecision {
+ const report=p.production?.continuityReview;
+ if(!p.plan||!p.production?.scriptApproved||!report||report.revision!==p.revision||!report.findings.length)throw new Error('请先取得当前版本的场记问题报告，并确认剧本。');
+ if(p.mode==='demo')throw new Error('自动修订需要真实语言模型；演示模式请手动调整。');
+ const roles=projectAgents(p).filter(r=>r.enabled);
+ const role=roles.find(r=>r.id==='storyboard')??roles.find(r=>r.id==='director')??roles.find(r=>r.stages.includes('storyboard'));
+ if(!role)throw new Error('请启用分镜导演或负责分镜的岗位。');
+ return {roleId:role.id,action:'revise_shots',reason:'按当前版本专业场记报告逐项修订分镜，保留已确认剧本、全部对白和场次时长；不生成媒体。'};
 }

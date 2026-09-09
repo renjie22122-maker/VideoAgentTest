@@ -7,7 +7,7 @@ export function falRoute(refs:string[],compose=false){if(refs.length>10)throw ne
 function queueURL(value:unknown){if(typeof value!=='string')throw new Error('fal 未返回任务跟踪地址。');const url=new URL(value);if(url.origin!=='https://queue.fal.run'||url.username||url.password)throw new Error('fal 返回了不可信的任务地址。');return url.href;}
 async function call(url:string,body?:unknown){
  const key=setting('FAL_API_KEY');if(!key)throw new Error('请先配置 fal.ai API Key。');
- let result;try{result=await fetchJSON(queueURL(url),{method:body===undefined?'GET':'POST',redirect:'error',headers:{Authorization:'Key '+key,'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})},60000);}catch(e){throw networkError(e,'queue.fal.run');}
+ let result;try{result=await fetchJSON(queueURL(url),{method:body===undefined?'GET':'POST',redirect:'error',headers:{Authorization:'Key '+key,'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})},body===undefined?60000:300000);}catch(e){throw networkError(e,'queue.fal.run');}
  if(!result.response.ok)throw new Error('fal 请求失败（HTTP '+result.response.status+'），请检查密钥、余额和模型权限。');return result.data as Record<string,unknown>;
 }
 export async function submitFal(prompt:string,refs:string[],compose=false){

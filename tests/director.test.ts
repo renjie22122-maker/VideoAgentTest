@@ -1,3 +1,4 @@
+import {withIntent} from './intent-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
@@ -30,7 +31,7 @@ void test('director repairs one malformed response, caps retries and leaves inpu
  t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{
   calls++;const input=JSON.parse(init.body as string);assert.match(input.messages[0].content,/wide\/medium\/close/);
   if(calls%2===0)assert.match(input.messages.at(-1).content,/JSON 不完整/);
-  return new Response(JSON.stringify({choices:[{message:{content:alwaysInvalid||calls%2===1?'invalid JSON':JSON.stringify({shots:demoPlan(p).shots})}}]}));
+  return new Response(JSON.stringify({choices:[{message:{content:alwaysInvalid||calls%2===1?'invalid JSON':JSON.stringify({shots:withIntent(demoPlan(p).shots,p.production!.script!)})}}]}));
  });
  const {generatePlan}=await import('../lib/studio/providers.ts');
  const result=await generatePlan(p);assert.equal(result.shots.length,4);assert.equal(calls,2);assert.deepEqual(p,before);

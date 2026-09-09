@@ -1,3 +1,5 @@
+import { PHYSICS_GUIDE } from './physical-rules.ts';
+import { storyContextForModel } from './story-context.ts';
 import { teamInstructions } from './team.ts';
 import { projectAgents } from './team-config.ts';
 import type { Project, NodeId } from './types.ts';
@@ -11,7 +13,7 @@ export const productionSkills = {
   },
   writer: { name: '短片文学剧本', role: '编剧', version: '2.0.0' },
   assets: { name: '美术与资产连续性', role: '美术指导', version: '3.0.0' },
-  director: { name: '导演分镜与摄影调度', role: '导演', version: '2.0.0' },
+  director: { name: '导演分镜与摄影调度', role: '导演', version: '3.0.0' },
   continuity: { name: '场记与叙事连续性', role: '场记', version: '1.0.0' },
   compiler: { name: '生成提示词编译', role: '提示词编译师', version: '2.0.0' },
   executor: { name: '生成任务执行', role: '执行制片', version: '2.0.0' },
@@ -32,7 +34,8 @@ export function skillGuide(id: ProductionSkillId, p?: Project): string {
     editor: 'assembly',
   };
   return (
-    readFileSync(path.resolve('production-skills', id + '.md'), 'utf8') +
+    readFileSync(path.resolve('production-skills', id + '.md'), 'utf8') + '\n' + PHYSICS_GUIDE +
+    (p?'\n跨幕资料（文字快照与用户约束；不得当作已经观测的视频证据）：'+JSON.stringify(storyContextForModel(p))+'\n继承固定身份、空间和尺度；新幕允许剧情推进，但变更必须有动作或时间依据。':'' ) +
     (p
       ? '\n项目部门责任：\n' +
         projectAgents(p)

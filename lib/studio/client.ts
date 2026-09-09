@@ -1,8 +1,9 @@
+import { studioTimeoutMs } from './timeouts.ts';
 import { fetchJSON } from './http.ts';
 
 export async function studioRequest<T>(action:string,data:Record<string,unknown>={}):Promise<T>{
  try{
-  const {response,data:body}=await fetchJSON('/api/studio',{method:'POST',headers:{'Content-Type':'application/json','X-Frame-Local':'1'},body:JSON.stringify({action,...data})},['status','settings','skills','list','get'].includes(action)?15000:['auto_step','create','clarify_answers','approve_assets','approve_script','asset_inventory','asset_refresh_inventory','asset_save_bible'].includes(action)?630000:330000);
+  const {response,data:body}=await fetchJSON('/api/studio',{method:'POST',headers:{'Content-Type':'application/json','X-Frame-Local':'1'},body:JSON.stringify({action,...data})},studioTimeoutMs(action));
   const result=body as {error?:string;data:T};
   if(!response.ok)throw new Error(result.error||'请求失败，请重新打开作品查看当前状态。');
   return result.data;

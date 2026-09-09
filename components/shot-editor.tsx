@@ -1,4 +1,5 @@
 'use client';
+import { ShotIntentView } from './shot-intent-view';
 import { MotionEditor } from './motion-editor';
 import type { Shot, Camera } from '@/lib/studio/types';
 import { Button } from '@/components/ui/button';
@@ -17,7 +18,7 @@ export function ShotEditor({shot,onChange,onSave,onMotionPlan,busy,dirty}:{shot:
  {(['start','end'] as const).map(key=><div key={key} className="path-controls"><h3>{key==='start'?'起点':'终点'}</h3><div className="form-grid">{(['x','y','z'] as const).map(axis=><div key={axis}>{slider(({x:'左右 X',y:'高度 Y',z:'距离 Z'})[axis],shot.camera[key][axis],axis==='x'?-10:.1,axis==='z'?15:10,.1,v=>camera({[key]:{...shot.camera[key],[axis]:v}}))}</div>)}</div></div>)}
  <label>速度曲线<select value={shot.camera.easing} onChange={e=>camera({easing:e.target.value as Camera['easing']})}><option value="ease-in-out">平滑起停</option><option value="linear">匀速</option></select></label>
  <details><summary>场记与声音</summary><label>对白<textarea value={shot.dialogue} onChange={e=>set({dialogue:e.target.value})}/></label><label>声音设计<input value={shot.sound} onChange={e=>set({sound:e.target.value})}/></label>{(['startState','endState'] as const).map(key=><div key={key}><h3>{key==='startState'?'起始状态':'结束状态'}</h3>{(['pose','wardrobe','props','light'] as const).map(field=><label key={field}>{{pose:'动作',wardrobe:'服装',props:'道具',light:'光线'}[field]}<input value={shot[key][field]} onChange={e=>set({[key]:{...shot[key],[field]:e.target.value}})}/></label>)}<div className="form-grid"><label>轴线侧<select value={shot[key].axis} onChange={e=>set({[key]:{...shot[key],axis:e.target.value}})}><option>A</option><option>B</option></select></label><label>画面运动方向<select value={shot[key].screenDirection} onChange={e=>set({[key]:{...shot[key],screenDirection:e.target.value}})}><option value="left-to-right">左 → 右</option><option value="right-to-left">右 → 左</option><option value="static">静止</option></select></label></div></div>)}</details>
- <MotionEditor shot={shot} onChange={onChange} onPlan={dirty?undefined:onMotionPlan} busy={busy}/><Button className="full" disabled={busy||!dirty} onClick={onSave}>{dirty?'保存修改 · 下游素材将失效':'已保存'}</Button></div>;
+ <ShotIntentView shot={shot}/><MotionEditor shot={shot} onChange={onChange} onPlan={dirty?undefined:onMotionPlan} busy={busy}/><Button className="full" disabled={busy||!dirty} onClick={onSave}>{dirty?'保存修改 · 下游素材将失效':'已保存'}</Button></div>;
 }
 
 

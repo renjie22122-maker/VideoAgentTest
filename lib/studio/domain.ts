@@ -1,3 +1,8 @@
+import {validateSoundCues} from './sound-plan.ts';
+import {validatePerformance} from './performance.ts';
+import {validateNarrative,previousNarrativeShot,referencePredecessor} from './narrative.ts';
+import { PHYSICS_GUIDE } from './physical-rules.ts';
+import { validateShotIntent,cameraSpeedSummary } from './shot-intent.ts';
 import { validateMotion, motionWarnings, motionGuidance } from './motion.ts';
 import type { Project, Plan, Shot, Issue, ContinuityState, Bible } from './types.ts';
 
@@ -13,8 +18,10 @@ function object(v:unknown):Record<string,unknown>{if(!v||typeof v!=='object'||Ar
 export function validateState(v:unknown):ContinuityState { const s=object(v);return {pose:text(s.pose,'动作状态',500),screenDirection:oneOf(s.screenDirection,['left-to-right','right-to-left','static'],'运动方向'),wardrobe:text(s.wardrobe,'服装',1000),props:text(s.props,'道具',1000),light:text(s.light,'光线',1000),axis:oneOf(s.axis,['A','B'],'轴线')}; }
 export function validateShot(v:unknown,index:number):Shot {
   const s=object(v),c=object(s.camera),start=object(c.start),end=object(c.end);
+  let videoInput:Shot['videoInput'];
+  if(s.videoInput!==undefined){const v=object(s.videoInput);const mode=oneOf(v.mode,['text','references','first','first_last'] as const,'视频模式');if(v.assetIds!==undefined&&(!Array.isArray(v.assetIds)||v.assetIds.length>9||v.assetIds.some(id=>typeof id!=='string')||new Set(v.assetIds).size!==v.assetIds.length))throw new Error('参考资产选择无效。');if(v.lastFrameUrl!==undefined&&(typeof v.lastFrameUrl!=='string'||(!v.lastFrameUrl.startsWith('https://')&&!/^\/api\/studio-images\/[a-f0-9-]{36}\.(png|jpg|webp)$/.test(v.lastFrameUrl))))throw new Error('尾帧地址无效。');videoInput={mode,assetIds:v.assetIds as string[]|undefined,lastFrameUrl:v.lastFrameUrl as string|undefined};}
   const point=(p:Record<string,unknown>)=>({x:finite(p.x,-10,10,'相机 X'),y:finite(p.y,0.1,10,'相机高度'),z:finite(p.z,0.1,15,'相机距离')});
-  return {...(s.motion===undefined?{}:{motion:validateMotion(s.motion)}),id:'shot-'+(index+1),scene:text(s.scene,'场景',100),title:text(s.title,'镜头标题',100),beat:text(s.beat,'叙事目的',1000),description:text(s.description,'画面',4000),dialogue:typeof s.dialogue==='string'?s.dialogue.slice(0,1000):'',sound:typeof s.sound==='string'?s.sound.slice(0,1000):'',duration:finite(s.duration,2,15,'镜头时长'),size:oneOf(s.size,['wide','medium','close'],'景别'),transition:oneOf(s.transition,['cut','dissolve'],'转场'),camera:{movement:oneOf(c.movement,['fixed','push','pull','track','orbit'],'运镜'),lens:finite(c.lens,18,135,'焦距'),start:point(start),end:point(end),easing:oneOf(c.easing,['linear','ease-in-out'],'缓动')},startState:validateState(s.startState),endState:validateState(s.endState)};
+  return {...(s.soundCues===undefined?{}:{soundCues:validateSoundCues(s.soundCues)}),...(s.performance===undefined?{}:{performance:validatePerformance(s.performance)}),...(s.narrative===undefined?{}:{narrative:validateNarrative(s.narrative)}),...(s.intent===undefined?{}:{intent:validateShotIntent(s.intent)}),...(videoInput?{videoInput}:{}),...(s.motion===undefined?{}:{motion:validateMotion(s.motion)}),id:'shot-'+(index+1),scene:text(s.scene,'场景',100),title:text(s.title,'镜头标题',100),beat:text(s.beat,'叙事目的',1000),description:text(s.description,'画面',4000),dialogue:typeof s.dialogue==='string'?s.dialogue.slice(0,1000):'',sound:typeof s.sound==='string'?s.sound.slice(0,1000):'',duration:finite(s.duration,2,15,'镜头时长'),size:oneOf(s.size,['wide','medium','close'],'景别'),transition:oneOf(s.transition,['cut','dissolve'],'转场'),camera:{movement:oneOf(c.movement,['fixed','push','pull','track','orbit'],'运镜'),lens:finite(c.lens,18,135,'焦距'),start:point(start),end:point(end),easing:oneOf(c.easing,['linear','ease-in-out'],'缓动')},startState:validateState(s.startState),endState:validateState(s.endState)};
 }
 export function validateBible(value:unknown):Bible {
  const raw=object(value),b=raw.bible&&typeof raw.bible==='object'?object(raw.bible):raw;
@@ -50,7 +57,7 @@ export function demoPlan(p:Project):Plan {
 export function checkContinuity(plan:Plan, targetDuration?:number):Issue[] {
   const issues:Issue[]=[];const add=(s:Shot,code:string,message:string,level:Issue['level']='warning')=>issues.push({shotId:s.id,level,code,message});
   plan.shots.forEach((s,i)=>{
-    const prev=plan.shots[i-1];
+    const prev=previousNarrativeShot(plan.shots,i);
     for(const message of motionWarnings(s))add(s,'motion-program',message);
     const spoken=s.dialogue.replace(/[\s\p{P}]/gu,'').length;
     if(spoken>s.duration*4)add(s,'dialogue-density','本镜对白约 '+spoken+' 字，仅 '+s.duration+' 秒；按每秒 3–4 字粗估需 '+Math.ceil(spoken/4)+'–'+Math.ceil(spoken/3)+' 秒，另需动作与停顿时间。请延长或跨镜分配对白。');
@@ -65,7 +72,7 @@ export function checkContinuity(plan:Plan, targetDuration?:number):Issue[] {
       for(const [key,label] of [['wardrobe','服装'],['props','道具'],['light','光线'],['pose','动作状态']] as const)if(prev.endState[key]!==s.startState[key])add(s,'continuity-'+key,label+'描述不同，需语义复核，并非已确认穿帮。前镜结束：'+prev.endState[key]+'；本镜开始：'+s.startState[key]);
       if(prev.endState.axis!==s.startState.axis&&s.transition==='cut')add(s,'axis','直接切换到了轴线另一侧，建议增加中性镜头。');
       if(prev.endState.screenDirection!==s.startState.screenDirection&&prev.endState.screenDirection!=='static'&&s.startState.screenDirection!=='static')add(s,'direction','相邻镜头运动方向反转。');
-      if(prev.size===s.size&&Math.abs(prev.camera.lens-s.camera.lens)<10&&s.transition==='cut')add(s,'jump-cut','连续同景别、近似焦距可能形成跳切，请检查角度和动作。');
+      if(plan.shots[i-1]===prev&&prev.size===s.size&&Math.abs(prev.camera.lens-s.camera.lens)<10&&s.transition==='cut')add(s,'jump-cut','连续同景别、近似焦距可能形成跳切，请检查角度和动作。');
     }
   });
   const total=plan.shots.reduce((n,s)=>n+s.duration,0);if(targetDuration&&Math.abs(total-targetDuration)>.5)issues.push({shotId:plan.shots[0].id,level:'warning',code:'duration',message:'分镜合计 '+total+' 秒，与目标 '+targetDuration+' 秒不同。'});
@@ -73,11 +80,11 @@ export function checkContinuity(plan:Plan, targetDuration?:number):Issue[] {
 }
 export function shotPrompt(p:Project,index:number):string {
   if(!p.plan)throw new Error('请先生成分镜。');const s=p.plan.shots[index];if(!s)throw new Error('镜头不存在。');
-  return JSON.stringify({motionPlan:motionGuidance(s),task:'cinematic shot',aspectRatio:p.ratio,durationSeconds:s.duration,bible:p.plan.bible,shot:s.description,dialogue:s.dialogue,sound:s.sound,shotSize:s.size,camera:{...s.camera,units:'meters relative to subject; x lateral, y height, z distance; look at subject origin',note:'camera path is creative guidance, provider may not support exact trajectory'},startState:s.startState,endState:s.endState,previousEndState:index?p.plan.shots[index-1].endState:null,referenceImage:s.referenceUrl??null,previousReferenceImage:index?p.plan.shots[index-1].referenceUrl??null:null,transition:s.transition});
+  return JSON.stringify({motionPlan:motionGuidance(s),physicsRules:PHYSICS_GUIDE,cameraSpeed:cameraSpeedSummary(s),soundCues:s.soundCues,performance:s.performance,shotIntent:s.intent,storyConstraints:p.storyContext?.guide,task:'cinematic shot',aspectRatio:p.ratio,durationSeconds:s.duration,bible:p.plan.bible,shot:s.description,dialogue:s.dialogue,sound:s.sound,shotSize:s.size,camera:{...s.camera,units:'meters relative to subject; x lateral, y height, z distance; look at subject origin',note:'camera path is creative guidance, provider may not support exact trajectory'},startState:s.startState,endState:s.endState,narrative:s.narrative,previousEndState:previousNarrativeShot(p.plan.shots,index)?.endState??null,referenceImage:s.referenceUrl??null,previousReferenceImage:referencePredecessor(p.plan.shots,index)?.referenceUrl??null,transition:s.transition});
 }
 export function invalidateFrom(p:Project,index:number):void {
   if(!p.plan)return;const ids=new Set(p.plan.shots.slice(index).map(s=>s.id));
   for(const s of p.plan.shots.slice(index)){delete s.referenceOrigin;delete s.referenceFilename;delete s.referenceUrl;delete s.videoUrl;delete s.referenceMode;delete s.videoMode;}
-  p.jobs=p.jobs.map(j=>ids.has(j.shotId)&&j.status!=='cancelled'?{...j,status:'cancelled',error:'分镜已修改，输出失效，请重新生成。'}:j);
+  p.jobs=p.jobs.map(j=>(ids.has(j.shotId)||j.group?.shots.some(s=>ids.has(s.id)))&&j.status!=='cancelled'?{...j,status:'cancelled',error:'分镜已修改，输出失效，请重新生成。'}:j);
   p.revision++;
 }

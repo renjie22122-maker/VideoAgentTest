@@ -1,3 +1,4 @@
+import {withIntent} from './intent-fixture.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
@@ -61,7 +62,7 @@ void test('live adapters: role separation, persisted media ids and automatic QA 
  const values={LLM_BASE_URL:'https://llm.example',LLM_API_KEY:'test-key',LLM_MODEL:'test-model',MEDIA_GATEWAY_URL:'https://media.example',MEDIA_API_KEY:'test-key',IMAGE_MODEL:'image-model',VIDEO_MODEL:'video-model',QA_GATEWAY_URL:'https://qa.example',QA_API_KEY:'test-key'};
  const before=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]]));Object.assign(process.env,values);t.after(()=>{for(const[k,v]of Object.entries(before)){if(v===undefined)delete process.env[k];else process.env[k]=v;}});
  const roles:string[]=[];const requests:Record<string,unknown>[]=[];let qaCalls=0;let clock=Date.now();t.mock.method(Date,'now',()=>clock);
- const template=demoPlan(fixture());
+ const template=demoPlan(fixture());template.shots=withIntent(template.shots,demoScreenplay(fixture()));
  t.mock.method(globalThis,'fetch',async(url:URL,options:RequestInit)=>{
    const target=String(url);const data=typeof options.body==='string'?JSON.parse(options.body):null;
    if(target.includes('llm.example')){const system=data.messages[0].content;roles.push(system);const content=system.includes('你是电影制作团队的创意开发编辑')?{summary:'理解创意',known:[],assumptions:[],questions:[],ready:true}:system.includes('你是电影制作团队的场记')?{summary:'无语义冲突',findings:[]}:system.includes('你是电影制作团队的提示词编译师')?{shots:template.shots.map(s=>({shotId:s.id,positive:s.description,negative:'避免角色变化',continuityAnchors:[s.startState.pose],capabilityNotes:['网关能力未知']}))}:system.includes('美术指导')?template.bible:system.includes('你是电影制作团队的编剧')?demoScreenplay(fixture()):template;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(content)}}]}));}

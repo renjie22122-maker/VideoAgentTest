@@ -1,4 +1,10 @@
-import { autoStep } from './autopilot.ts';
+import { nextStoryContext,validateStoryGuide } from './story-context.ts';
+import { videoGroup } from './video-group.ts';
+import { mergeShotPair } from './shot-merge.ts';
+import { suggestVideoAssets,videoAssetChoices } from './video-asset-selection.ts';
+import { miniMaxBase } from './minimax-video.ts';
+import { requeueFailedJob } from './job-recovery.ts';
+import { autoStep, continuityFixDecision } from './autopilot.ts';
 import { resolveDuration } from './duration.ts';
 import { MOTION_SCHEMA, validateMotion } from './motion.ts';
 import { runTeamReview } from './team-runtime.ts';
@@ -23,7 +29,7 @@ import { readImage } from './openai-images.ts';
 const root=path.resolve(process.env.STUDIO_DATA_DIR||'.studio');
 const file=path.join(root,'projects.json');
 let mutating=false;
-type Command={agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
+type Command={storyGuide?:unknown;neighborId?:string;videoInput?:Shot['videoInput'];regenerate?:boolean;agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
 async function load():Promise<Project[]> {try{return JSON.parse(await readFile(file,'utf8'));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return [];throw new Error('项目存储无法读取，请检查 .studio/projects.json。');}}
 async function save(data:Project[]){await mkdir(root,{recursive:true});const tmp=file+'.tmp';await writeFile(tmp,JSON.stringify(data,null,2),'utf8');await rename(tmp,file);}
 function bump(p:Project){p.updatedAt=Date.now();}
@@ -55,12 +61,71 @@ async function handle(input:Command):Promise<unknown>{
   if(input.action==='shot_image_prompt'){
     if(!p.plan?.shots.some(s=>s.id===input.shotId))throw new Error('镜头不存在。');
     const j=newJob(p,input.shotId!,'image');
-    const prepared=mediaInput(p,j) as {prompt:string;referenceImages:string[];model:string};
-    return {prompt:prepared.prompt,referenceImages:prepared.referenceImages,model:prepared.model,compiled:!!p.production?.prompts?.some(v=>v.shotId===input.shotId)};
+    const prepared=mediaInput(p,j) as {prompt:string;referenceImages:string[];model:string;referenceSelectionOmitted?:string[]};
+    return {referenceSelectionOmitted:prepared.referenceSelectionOmitted,prompt:prepared.prompt,referenceImages:prepared.referenceImages,model:prepared.model,compiled:!!p.production?.prompts?.some(v=>v.shotId===input.shotId)};
   }
   if(input.action==='get')return p;
   if(input.action!=='poll'&&input.action!=='cancel'&&input.revision!==p.revision)throw new Error('项目已在其他窗口更改，请重新打开项目后再编辑。');
   if(p.production?.autoRun?.status==='running'&&!['auto_start','auto_step','auto_stop'].includes(input.action??''))throw new Error('请先停止自动任务，再手动修改作品。');
+  if(input.action==='story_save'||input.action==='story_next'){
+    if(p.jobs.some(j=>['queued','running'].includes(j.status))||p.production?.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止当前生成任务。');
+    if(input.action==='story_save'){
+      const guide=validateStoryGuide(input.storyGuide);
+      p.storyContext={...p.storyContext,seriesId:p.storyContext?.seriesId??p.id,actNumber:p.storyContext?.actNumber??1,guide};
+      if(p.plan){invalidateFrom(p,0);reopenStoryboard(p);}else p.revision++;
+      bump(p);await save(all);return p;
+    }
+    if(!p.production?.scriptApproved)throw new Error('请先确认本幕剧本，再建立下一幕。');
+    const idea=text(input.idea,'下一幕创意',4000),timing=resolveDuration(input.duration,{idea,answers:{}});
+    const next:Project={id:randomUUID(),revision:1,title:'第 '+((p.storyContext?.actNumber??1)+1)+' 幕 · '+idea.slice(0,18),idea,duration:timing.seconds,durationMode:timing.mode,durationReason:timing.reason,ratio:p.ratio,mode:p.mode,createdAt:Date.now(),updatedAt:Date.now(),phase:'clarify',answers:{},questions:[],jobs:[],storyContext:nextStoryContext(p),production:initialProduction()};
+    next.production!.agentConfig=structuredClone(p.production.agentConfig);next.production!.costumeSelections=structuredClone(p.production.costumeSelections);
+    next.production!.library=structuredClone(p.production.library??[]).map(a=>({...a,retired:a.retired||!a.approved}));
+    all.push(next);await save(all);return next;
+  }
+  if(input.action==='enqueue_group'){
+    if(!p.production?.scriptApproved||!p.plan)throw new Error('请先确认剧本并完成文字分镜。');
+    if(p.jobs.some(j=>['running','queued'].includes(j.status)))throw new Error('请先等待或停止当前队列。');
+    const group=videoGroup(p,input.shotId??'',input.neighborId??'');
+    if(p.mode==='live'&&(!miniMaxBase(setting('MEDIA_GATEWAY_URL'))||setting('VIDEO_MODEL')!=='MiniMax-H3'))throw new Error('文字加美术参考图联合生成需要原生 MiniMax-H3。');
+    if(p.jobs.some(j=>j.group&&j.group.shots.some(s=>group.shots.some(g=>g.id===s.id))&&j.status==='failed'&&!j.remoteId))throw new Error('已有联合任务提交结果未知，请先核查供应商，不能直接重复提交。');
+    p.jobs.push({...newJob(p,group.shots[0].id,'video'),independent:true,group});
+    p.production.events.push({at:Date.now(),node:p.production.node,role:'用户',message:'用户直接批准多镜联合生成：'+group.shots.map(s=>s.id).join(' + ')+'；保存独立联合片段，不改写或批准其他分镜。'});
+    bump(p);await save(all);return p;
+  }
+  if(input.action==='merge_shots'){
+    if(!p.plan||!input.shotId||!input.neighborId)throw new Error('请选择两个相邻镜头。');
+    if(p.jobs.some(j=>['running','queued'].includes(j.status)))throw new Error('请先完成或停止生成队列，再合并分镜。');
+    if(p.plan.shots.length<=2)throw new Error('当前工作流至少保留两个镜头，请手动重新分配时长。');
+    const {index,merged}=mergeShotPair(p.plan.shots,input.shotId,input.neighborId);
+    validateShot(merged,index);
+    const backupDir=path.join(root,'auto-backups');await mkdir(backupDir,{recursive:true});await writeFile(path.join(backupDir,p.id+'-merge-'+Date.now()+'.json'),JSON.stringify(p,null,2));
+    invalidateFrom(p,index);p.plan.shots.splice(index,2,merged);p.plan.shots.forEach((s,i)=>{s.id='shot-'+(i+1);});reopenStoryboard(p);
+    p.production!.events.push({at:Date.now(),node:'storyboard',role:'用户',message:'合并 '+input.shotId+' 与 '+input.neighborId+' 为 '+merged.duration+' 秒连续镜头；对白与全片时长保留，需重新检查运镜与批准。'});
+    bump(p);await save(all);return p;
+  }
+  if(input.action==='video_config'||input.action==='video_tail_upload'){
+    if(p.jobs.some(j=>['running','queued'].includes(j.status)))throw new Error('请先停止或等待队列结束。');
+    const shot=p.plan?.shots.find(s=>s.id===input.shotId);if(!shot)throw new Error('镜头不存在。');
+    if(input.action==='video_tail_upload'){
+      const image=await saveAssetUpload(input.imageBase64);shot.videoInput={...shot.videoInput,mode:'first_last',lastFrameUrl:image.url};
+    }else{
+      const config=input.videoInput;
+      if(!config||!['text','references','first','first_last'].includes(config.mode))throw new Error('视频模式无效。');
+      if(config.assetIds&&(!Array.isArray(config.assetIds)||config.assetIds.length>9||config.assetIds.some(id=>typeof id!=='string')||new Set(config.assetIds).size!==config.assetIds.length))throw new Error('最多选择 9 张不同美术参考图。');
+      const assetIds=config.mode==='references'?(config.assetIds??suggestVideoAssets(p,shot.id).ids):config.assetIds;
+      if(config.mode==='references'&&(!assetIds?.length||assetIds.some(id=>!videoAssetChoices(p).some(a=>a.id===id))))throw new Error('请为本镜选择有效的已批准参考图；自动匹配为空时需手动选择。');
+      shot.videoInput={mode:config.mode,assetIds,lastFrameUrl:shot.videoInput?.lastFrameUrl};
+    }
+    const g=p.production!;const previousRevision=p.revision;
+    delete shot.videoMode;delete shot.videoUrl;p.jobs=p.jobs.map(j=>j.shotId===shot.id&&j.kind==='video'?{...j,status:'cancelled'}:j);p.revision++;
+    // Input configuration does not rewrite approved narrative or compiled text.
+    if(g.continuityReview?.revision===previousRevision)g.continuityReview.revision=p.revision;
+    if(g.renderApprovedRevision===previousRevision)g.renderApprovedRevision=p.revision;
+    g.qa=g.qa.filter(q=>q.shotId!==shot.id);g.editPlan=undefined;
+    if(g.node==='qa')transition(p,'generation','本镜视频输入配置已保存，等待用户单独生成。');
+    g.events.push({at:Date.now(),node:g.node,role:'用户',message:shot.id+' 视频输入配置已保存；文字分镜及原有批准保留，仅本镜视频需重新生成和审查。'});
+    bump(p);await save(all);return p;
+  }
   if(input.action==='shot_image_upload'){
     if(!p.plan||p.jobs.some(j=>['running','queued'].includes(j.status)))throw new Error('请先停止或等待生成队列，再上传分镜画面。');
     const i=p.plan.shots.findIndex(s=>s.id===input.shotId);if(i<0)throw new Error('镜头不存在。');
@@ -87,7 +152,7 @@ async function handle(input:Command):Promise<unknown>{
     p.brief=undefined;p.questions=[];delete p.plan;p.jobs=p.jobs.map(j=>({...j,status:'cancelled',error:'目标时长修改，需重新编剧和确认下游。'}));p.phase='clarify';p.revision++;
     p.production.events.push({at:Date.now(),node:'clarify',role:'制片',message:'目标时长改为 '+p.duration+' 秒，保留创意与回答，旧剧本及资产已归档，等待重新编剧。'});bump(p);await save(all);return p;
   }
-  if(['auto_start','auto_step','auto_stop'].includes(input.action??'')){
+  if(['auto_start','auto_step','auto_stop','continuity_fix'].includes(input.action??'')){
     const g=p.production!;if(!g)throw new Error('作品未初始化。');
     if(input.action==='auto_stop'){if(g.autoRun)g.autoRun.status='stopped';}
     else{
@@ -96,10 +161,12 @@ async function handle(input:Command):Promise<unknown>{
         if(g.autoRun?.status==='running')throw new Error('自动任务已经运行。');
         g.autoRun={status:'running',steps:0,maxSteps:4,instruction:text(input.notes,'自动任务要求',2000),log:[]};
       }else{
-        if(g.autoRun?.status!=='running')throw new Error('自动任务未启动。');
+        const assigned=input.action==='continuity_fix'?continuityFixDecision(p):undefined;
+        if(!assigned&&g.autoRun?.status!=='running')throw new Error('自动任务未启动。');
         const backupDir=path.join(root,'auto-backups');await mkdir(backupDir,{recursive:true});await writeFile(path.join(backupDir,p.id+'-'+Date.now()+'.json'),JSON.stringify(p,null,2));
         const candidate=structuredClone(p);
-        try{await autoStep(candidate);Object.assign(p,candidate);}catch(e){g.autoRun!.status='failed';g.autoRun!.error=e instanceof Error?e.message:'自动任务失败';}
+        if(assigned)candidate.production!.autoRun={status:'running',steps:0,maxSteps:1,instruction:assigned.reason,log:[]};
+        try{await autoStep(candidate,assigned);Object.assign(p,candidate);}catch(e){if(assigned)throw e;g.autoRun!.status='failed';g.autoRun!.error=e instanceof Error?e.message:'自动任务失败';}
       }
     }
     bump(p);await save(all);return p;
@@ -253,23 +320,35 @@ async function handle(input:Command):Promise<unknown>{
   }else if(input.action==='complete'){
     requireNode(p,'assembly','complete');if(!p.production!.editPlan)throw new Error('请先生成并查看后期方案。');if(p.production!.node!=='complete')transition(p,'complete','用户已完成预演视频导出。');
   }else if(input.action==='enqueue'){
-    requireNode(p,'generation');if(p.production!.renderApprovedRevision!==p.revision)throw new Error('请先批准当前版本提示词。');
+    requireNode(p,'generation','qa');if(p.production!.node==='qa')transition(p,'generation','用户重新生成单镜素材，返回生成阶段。');if(p.production!.renderApprovedRevision!==p.revision)throw new Error('请先批准当前版本提示词。');
     if(!p.plan)throw new Error('请先生成分镜。');if(input.kind!=='image'&&input.kind!=='video')throw new Error('任务类型无效。');
     if(checkContinuity(p.plan).some(i=>i.level==='error'))throw new Error('请先解决连续性检查中的错误。');
     if(p.mode==='live'&&!capabilities()[input.kind as 'image'|'video'])throw new Error(input.kind==='image'?'图像服务尚未配置，请在 API 设置中选择服务并填写对应密钥。':'视频网关尚未配置。');
     if(input.kind==='image'&&p.mode==='live'&&setting('IMAGE_PROVIDER')==='fal')requireAssetSets(p);
-    if(input.kind==='video'&&p.plan.shots.some(s=>p.mode==='live'?!s.referenceUrl:s.referenceMode!=='demo'))throw new Error('请先完成全部参考图。');
-    for(const shot of p.plan.shots){
+    const targets=input.shotId?p.plan.shots.filter(s=>s.id===input.shotId):p.plan.shots;
+    if(!targets.length)throw new Error('镜头不存在。');
+    if(input.kind==='video')for(const s of targets){const mode=s.videoInput?.mode??'first';if(p.mode==='live'&&mode!=='first'&&!miniMaxBase(setting('MEDIA_GATEWAY_URL')))throw new Error('这些视频模式目前需要原生 MiniMax H3 接口。');if(!['text','references'].includes(mode)&&(p.mode==='live'?!s.referenceUrl:s.referenceMode!=='demo'))throw new Error(s.id+' 缺少参考图首帧；可选择文字或美术参考图模式。');if(mode==='first_last'&&!s.videoInput?.lastFrameUrl)throw new Error(s.id+' 缺少尾帧。');}
+    if(input.regenerate){
+      if(!input.shotId)throw new Error('重新生成需指定单个镜头。');
+      const s=targets[0];const latest=p.jobs.findLast(j=>j.shotId===s.id&&j.kind===input.kind);
+      if(latest&&['queued','running'].includes(latest.status))throw new Error('此镜头正在生成，请勿重复提交。');
+      if(latest?.remoteId==='fal-pending')throw new Error('上次提交结果未知，请先核查供应商记录。');
+      if(latest?.status==='failed')throw new Error('失败任务请使用本镜生成 / 恢复查询，不能绕过重试保护。');
+      p.jobs.push({...newJob(p,s.id,input.kind),independent:true});
+      if(input.kind==='video')delete s.videoMode;
+      else {delete s.videoMode;delete s.videoUrl;}
+      p.production!.qa=p.production!.qa.filter(q=>q.shotId!==s.id);p.production!.editPlan=undefined;
+      bump(p);await save(all);return p;
+    }
+    for(const shot of targets){
       if(input.kind==='image'&&shot.referenceUrl)continue;
       if(p.jobs.some(j=>j.shotId===shot.id&&j.kind===input.kind&&['queued','running','succeeded'].includes(j.status)))continue;
       const failed=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind===input.kind&&j.status==='failed'&&j.revision===p.revision);
       if(failed){
-        if((failed.retries??0)>=p.production!.maxRetries||(failed.qaRetries??0)>=p.production!.maxRetries)throw new Error('该版本已达到重试上限，请修改分镜后重新批准。');
-        if(failed.remoteId==='fal-pending')failed.remoteId=undefined;
-        failed.retries=(failed.retries??0)+1;failed.status='queued';failed.error=undefined;continue;
+        requeueFailedJob(failed,p.production!.maxRetries);if(input.shotId)failed.independent=true;continue;
       }
       if(p.jobs.filter(j=>j.shotId===shot.id&&j.kind===input.kind&&j.revision===p.revision).length>=p.production!.maxRetries+1)throw new Error('该镜头已达到本版本任务预算，请修改分镜开启新版本。');
-      p.jobs.push(newJob(p,shot.id,input.kind));
+      p.jobs.push({...newJob(p,shot.id,input.kind),independent:!!input.shotId});
     }
   }else if(input.action==='cancel'){
     p.jobs=p.jobs.map(j=>['queued','running'].includes(j.status)?{...j,status:'cancelled',error:'已停止本地跟踪；远端已提交的任务可能继续执行并计费。'}:j);
@@ -288,7 +367,7 @@ async function tick(p:Project,persist:()=>Promise<void>){
   // A sequential queue ensures that downstream requests receive the previous output.
   const index=p.plan.shots.findIndex(s=>s.id===job.shotId),shot=p.plan.shots[index];
   const previous=index>0?p.plan.shots[index-1]:undefined;
-  if(previous){const ready=job.kind==='image'?(job.mode==='demo'?previous.referenceMode==='demo':!!previous.referenceUrl):(job.mode==='demo'?previous.videoMode==='demo':!!previous.videoUrl);if(!ready){job.status='failed';job.error='上一镜头尚未成功，请先重试上游任务。';return;}}
+  if(previous&&!job.independent&&(job.kind==='image'||(!shot.videoInput&& !miniMaxBase(setting('MEDIA_GATEWAY_URL'))))){const ready=job.kind==='image'?(job.mode==='demo'?previous.referenceMode==='demo':!!previous.referenceUrl):(job.mode==='demo'?previous.videoMode==='demo':!!previous.videoUrl);if(!ready){job.status='failed';job.error='上一镜头尚未成功，请先重试上游任务。';return;}}
   try{
     if(job.status==='queued'){
       job.status='running';job.startedAt=Date.now();job.input=mediaInput(p,job);
@@ -297,6 +376,7 @@ async function tick(p:Project,persist:()=>Promise<void>){
       return;
     }
     if(Date.now()-(job.startedAt||0)>30*60*1000){job.status='failed';job.error='生成超过 30 分钟，请在供应商端核查任务。';return;}
+    if(job.group&&job.mode==='demo'){job.status='succeeded';job.finishedAt=Date.now();return;}
     if(job.mode==='demo'){
       if(Date.now()-(job.startedAt||0)<900)return;
       job.status='succeeded';job.finishedAt=Date.now();if(job.kind==='image')shot.referenceMode='demo';else if(await reflect(p,job))shot.videoMode='demo';return;
@@ -305,7 +385,7 @@ async function tick(p:Project,persist:()=>Promise<void>){
     if(!job.remoteId){job.remoteId=await submitMedia(p,job);return;}
     if(job.remoteId==='fal-pending')throw new Error('上次 fal 提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
     const result=await pollMedia(job);job.status=result.status;job.error=result.error;
-    if(result.status==='succeeded'){job.outputUrl=result.outputUrl;job.finishedAt=Date.now();if(job.kind==='image'){shot.referenceUrl=result.outputUrl;shot.referenceMode='live';shot.referenceOrigin='generated';}else if(await reflect(p,job)){shot.videoUrl=result.outputUrl;shot.videoMode='live';}}
+    if(result.status==='succeeded'){job.outputUrl=result.outputUrl;job.finishedAt=Date.now();if(job.group)return;if(job.kind==='image'){shot.referenceUrl=result.outputUrl;shot.referenceMode='live';shot.referenceOrigin='generated';}else if(await reflect(p,job)){shot.videoUrl=result.outputUrl;shot.videoMode='live';}}
   }catch(e){job.status='failed';job.error=e instanceof Error?e.message:'生成失败';}
 }
 async function reflect(p:Project,j:Job):Promise<boolean>{

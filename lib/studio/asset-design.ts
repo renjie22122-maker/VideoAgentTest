@@ -11,13 +11,19 @@ export function compileAssetDesign(kind:Asset['kind'],name:string,d:AssetDesign)
 }
 export function validateAssetDesigns(raw:Record<string,unknown>,p:Project):Asset[]{
  if(!Array.isArray(raw.assets)||!raw.assets.length||raw.assets.length>24)throw new Error('资产清单需要 1–24 项。');
- const source=JSON.stringify({script:p.production?.script,bible:p.production?.assets?.bible});
+ const sources:string[]=[];
+ const collect=(value:unknown):void=>{
+  if(typeof value==='string')sources.push(value);
+  else if(Array.isArray(value))value.forEach(collect);
+  else if(value&&typeof value==='object')Object.values(value).forEach(collect);
+ };
+ collect(p.production?.script);collect(p.production?.assets?.bible);
  const seen=new Set<string>();
  return raw.assets.map(value=>{
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('资产设计格式错误。');const v=value as Record<string,unknown>;
   if(!['character','background','prop'].includes(String(v.kind)))throw new Error('资产类型错误。');
   const kind=v.kind as Asset['kind'],name=text(v.name,'资产名称',100),evidence=text(v.evidence,'资产依据',300);
-  if(!source.includes(evidence))throw new Error('资产依据未出现在剧本或美术设定中。');
+  if(!sources.some(source=>source.includes(evidence)))throw new Error('资产「'+name+'」的依据未匹配剧本或美术设定原文：'+JSON.stringify(evidence)+'。请从 script 或 bible 的单个文本字段逐字引用连续片段，不要改写、拼接或引用任务要求。');
   if(seen.has(kind+name))throw new Error('资产名称重复。');seen.add(kind+name);
   const description=text(v.description,'可见设计',1600);
   if(kind!=='background'&&/教室|操场|暴雨|下雨|雨幕|窗外|站在|走进/.test(description))throw new Error('人物或道具设计混入了场景、天气或动作，请只保留外观。');

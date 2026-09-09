@@ -15,3 +15,11 @@ void test('structured design disallows narrative style and cross-asset lighting 
 void test('saved legacy prompts cannot silently bypass the new compiler',async()=>{
  await assert.rejects(startAsset({mode:'live'} as Project,{prompt:'old'} as Asset),/旧版资产提示词/);
 });
+
+void test('asset evidence matches original text, not JSON escapes, keys or joined fields',()=>{
+ const evidence='他说："看这里"\n黑色外壳，路径 C:\\props';
+ const p={production:{script:{note:evidence,first:'左侧',second:'按钮'},assets:{bible:{props:'黑色手机'}}}} as unknown as Project;
+ const item={kind:'prop',name:'手机',evidence,description:'黑色外壳',renderStyle:'photographic',colors:[],lighting:'studio soft light'};
+ assert.equal(validateAssetDesigns({assets:[item]},p)[0].evidence,evidence);
+ for(const invalid of ['note','左侧按钮','金色手机','部门要求新增手机'])assert.throws(()=>validateAssetDesigns({assets:[{...item,evidence:invalid}]},p),error=>error instanceof Error&&error.message.includes('手机')&&error.message.includes(invalid));
+});

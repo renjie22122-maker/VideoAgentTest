@@ -1,0 +1,10 @@
+'use client';
+import {useState} from 'react';
+import type {Project} from '@/lib/studio/types';
+import {emptyStoryGuide} from '@/lib/studio/story-context';
+import {Button} from './ui/button';
+export function StoryContinuity({project,busy,act}:{project:Project;busy:boolean;act:(action:string,data?:Record<string,unknown>,navigate?:boolean)=>Promise<unknown>}){
+ const [guide,setGuide]=useState(project.storyContext?.guide??emptyStoryGuide()),[idea,setIdea]=useState('');const dirty=JSON.stringify(guide)!==JSON.stringify(project.storyContext?.guide??emptyStoryGuide());
+ return <details className="panel"><summary>同一故事 · 第 {project.storyContext?.actNumber??1} 幕 · 连续性资料与下一幕</summary><p>固定规则和已确认资产可继承到下一幕；每幕独立制作，后续修改不自动覆盖前幕。上一幕文字快照不是实际视频审查结论。</p>{project.storyContext?.previousAct&&<div><h3>承接：{project.storyContext.previousAct.title}</h3><p>{project.storyContext.previousAct.ending}</p><p>{project.storyContext.previousAct.note}</p></div>}
+ {([['canon','角色身份、世界规则与不可改写的事实'],['visualLanguage','全故事视听语言：色彩、镜头表达、节奏与运动偏好'],['scaleRules','尺度与物理规则：人物身高、物体相对尺寸、空间关系及超常例外'],['handoff','本幕实际交接：位置、持物、伤势、服装、时间与未解决事件']] as const).map(([key,label])=><label key={key}>{label}<textarea disabled={busy} value={guide[key]} onChange={e=>setGuide({...guide,[key]:e.target.value})}/></label>)}<label>允许的剪辑结构<select disabled={busy} value={guide.editingMode} onChange={e=>setGuide({...guide,editingMode:e.target.value as typeof guide.editingMode})}><option value="linear">按场次顺序</option><option value="parallel">允许有依据的跨场交叉剪辑</option></select></label><Button disabled={busy||!dirty} onClick={()=>void act('story_save',{storyGuide:guide})}>保存故事资料（已有分镜需重新检查）</Button><p>不要把猜测尺寸写成已确认事实。未填写的物理常识由默认规则补充；特殊能力请在世界规则中说明。</p><h3>继续同一故事的下一幕</h3><label>下一幕创意<textarea disabled={busy} value={idea} onChange={e=>setIdea(e.target.value)} placeholder="说明时间推进、人物目标与新事件；已有固定设定无需重写。"/></label><Button disabled={busy||dirty||!idea.trim()||!project.production?.scriptApproved} onClick={()=>void act('story_next',{idea,duration:'auto'},true)}>创建下一幕，继承故事资料和已批准资产（不生成）</Button><p>创建后先分析下一幕创意；画外音、状态变化和新资产由 Agent 针对性澄清。复制的是本地引用，远端图片仍可能过期。</p></details>;
+}

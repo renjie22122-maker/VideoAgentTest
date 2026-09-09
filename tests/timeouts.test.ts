@@ -30,7 +30,7 @@ void test('long generation does not block reads or queue duplicate writes; failu
  t.mock.method(globalThis,'fetch',async()=>{calls++;started();await gate;return {ok:true,json:async()=>{throw new DOMException('timeout','TimeoutError');}};});
  const {dispatch}=await import('../lib/studio/server.ts');
  const command={action:'create',idea:'一个女孩在车站找到信',duration:30,ratio:'16:9' as const,mode:'live' as const};
- const pending=dispatch(command);const failure=assert.rejects(pending,/连接 llm.example 超时/);
+ const pending=dispatch(command);const failure=assert.rejects(pending,/等待 llm.example 返回完整结果/);
  await startedPromise;
  try{
   assert.deepEqual(await dispatch({action:'list'}),[]);
@@ -40,4 +40,12 @@ void test('long generation does not block reads or queue duplicate writes; failu
  }finally{release();}
  await failure;
  assert.ok(await dispatch({...command,mode:'demo'}));
+});
+
+void test('workflow deadlines cover sequential model calls and preserve short reads',async()=>{
+ const {LLM_TIMEOUT_MS,studioTimeoutMs}=await import('../lib/studio/timeouts.ts');
+ assert.equal(LLM_TIMEOUT_MS,900000);
+ assert.ok(studioTimeoutMs('auto_step')>2*LLM_TIMEOUT_MS);
+ assert.ok(studioTimeoutMs('approve_script')>4*LLM_TIMEOUT_MS);
+ assert.equal(studioTimeoutMs('get'),15000);
 });

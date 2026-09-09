@@ -48,3 +48,7 @@ __pycache__/
 
 # one-off local project maintenance
 /scripts/repair-rain-timing.ts
+
+# local verification output
+/.build-results.txt
+/.test-results.txt

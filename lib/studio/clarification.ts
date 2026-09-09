@@ -6,7 +6,7 @@ export type CreativeBrief={summary:string;known:{topic:string;value:string;evide
 export type ClarificationResult={brief:CreativeBrief;questions:Question[]};
 function obj(v:unknown):Record<string,unknown>{if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('创意分析格式无效。');return v as Record<string,unknown>;}
 export function clarificationSources(p:Project,history:CreativeBrief['history']){
- return [{id:'idea',text:p.idea},...history.map((h,i)=>({id:'answer-'+i,text:h.answer})),...Object.entries(p.answers).map(([id,answer])=>({id:'additional-'+id,text:answer})),{id:'duration',text:p.duration+' 秒'+(p.durationMode==='auto'?'（系统暂估，非用户指定）':'')},{id:'ratio',text:p.ratio}];
+ return [{id:'idea',text:p.idea},...Object.entries(p.storyContext?.guide??{}).filter(([key,value])=>key!=='editingMode'&&typeof value==='string'&&value).map(([key,value])=>({id:'story-'+key,text:value})),...history.map((h,i)=>({id:'answer-'+i,text:h.answer})),...Object.entries(p.answers).map(([id,answer])=>({id:'additional-'+id,text:answer})),{id:'duration',text:p.duration+' 秒'+(p.durationMode==='auto'?'（系统暂估，非用户指定）':'')},{id:'ratio',text:p.ratio}];
 }
 export function validateClarification(raw:unknown,p:Project,history:CreativeBrief['history']):ClarificationResult{
  const v=obj(raw);if(!Array.isArray(v.known)||v.known.length>30||!Array.isArray(v.assumptions)||v.assumptions.length>12||!Array.isArray(v.questions)||v.questions.length>4||typeof v.ready!=='boolean')throw new Error('创意分析没有返回有效的事实、建议与问题。');

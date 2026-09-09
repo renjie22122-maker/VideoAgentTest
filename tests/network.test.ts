@@ -8,3 +8,8 @@ void test('network errors distinguish permissions, timeout and DNS without discl
  assert.match(networkError({cause:{code:'ENOTFOUND'}},'api.deepseek.com').message,/DNS/);
  assert.ok(!networkError({message:'secret-token'},'api.deepseek.com').message.includes('secret-token'));
 });
+
+void test('connection failure differs from inference and body timeouts',()=>{
+ assert.match(networkError({cause:{code:'UND_ERR_CONNECT_TIMEOUT'}},'api.deepseek.com').message,/建立到/);
+ for(const error of [{name:'TimeoutError'},{cause:{code:'UND_ERR_BODY_TIMEOUT'}},{cause:{code:'UND_ERR_HEADERS_TIMEOUT'}}])assert.match(networkError(error,'api.deepseek.com').message,/完整结果.*可能已处理并计费/);
+});

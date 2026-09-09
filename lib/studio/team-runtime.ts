@@ -16,7 +16,7 @@ export async function runTeamReview(p: Project, roleId: unknown) {
             role.deliverable +
             '。' +
             role.checks +
-            ' 只审查提供的文本，不声称看过图片或视频。返回 {summary:string,findings:[{shotId:string, severity:"note"|"warning"|"error", evidence:string, suggestion:string, returnTo:string}]}。全局问题 shotId 为空字符串。returnTo 必须是给定岗位 ID。最多 20 项，证据不足则注明需要人工确认。',
+            ' 只审查提供的文本，不声称看过图片或视频。同一资产有多个候选、仅一个批准版本是正常状态，不得报告为批准不一致；按 familyId、viewId 和 costumeOf 区分版本及套组。返回 {summary:string,findings:[{shotId:string, severity:"note"|"warning"|"error", evidence:string, suggestion:string, returnTo:string}]}。全局问题 shotId 为空字符串。returnTo 必须是给定岗位 ID。最多 20 项，证据不足则注明需要人工确认。',
           {
             idea: p.idea,
             duration: p.duration,
@@ -26,6 +26,11 @@ export async function runTeamReview(p: Project, roleId: unknown) {
               ?.filter((a) => !a.retired)
               .map((a) => ({
                 id: a.id,
+                familyId: a.parentId ?? a.id,
+                version: a.version,
+                viewId: a.viewId,
+                costumeOf: a.costumeOf,
+                status: a.status,
                 name: a.name,
                 design: a.design,
                 approved: a.approved,
