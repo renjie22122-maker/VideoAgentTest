@@ -9,6 +9,7 @@ import {
 import { text } from './domain.ts';
 import { transition } from './graph.ts';
 import { referencePredecessor } from './narrative.ts';
+import { buildArtifactGraph, downstreamClosure, recordInvalidation } from './artifact-graph.ts';
 import type { Asset, Project } from './types.ts';
 const identity = (a: Pick<Asset, 'kind' | 'name'>) =>
   a.kind + ':' + a.name.normalize('NFKC').trim().toLowerCase();
@@ -85,6 +86,8 @@ export function updateAssetRequirement(p: Project, asset: Asset, raw: unknown) {
 /** An approved reference changes media dependencies, not the confirmed screenplay. */
 export function invalidateAssetMedia(p: Project, asset: Asset) {
   if (!p.plan || asset.viewId) return [];
+  // Lineage snapshot before media is cleared below.
+  const beforeGraph = buildArtifactGraph(p);
   const root = assetRoot(asset, p.production?.library ?? []);
   if (!assetReadiness(p).some((a) => a.root.id === root.id)) return [];
   const ids = new Set(
@@ -191,5 +194,14 @@ export function invalidateAssetMedia(p: Project, asset: Asset) {
       ids.size +
       ' 个关联/接续镜头的旧媒体已归档；其他镜头保留。',
   });
+  // Lineage: the graph-derived downstream closure plus the operational shot set.
+  const changedRefs = [{ id: asset.id, kind: 'asset' as const }];
+  const affectedRefs = [
+    ...downstreamClosure(beforeGraph, changedRefs),
+    ...[...ids].map((id) => ({ id, kind: 'shot' as const })),
+  ].filter(
+    (ref, i, all) => all.findIndex((r) => r.id === ref.id && r.kind === ref.kind) === i,
+  );
+  recordInvalidation(p, changedRefs, affectedRefs);
   return [...ids];
 }

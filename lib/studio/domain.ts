@@ -4,6 +4,7 @@ import {validateNarrative,previousNarrativeShot,referencePredecessor} from './na
 import { PHYSICS_GUIDE } from './physical-rules.ts';
 import { validateShotIntent,cameraSpeedSummary } from './shot-intent.ts';
 import { validateMotion, motionWarnings, motionGuidance } from './motion.ts';
+import { buildArtifactGraph, downstreamClosure, recordInvalidation } from './artifact-graph.ts';
 import type { Project, Plan, Shot, Issue, ContinuityState, Bible } from './types.ts';
 
 export function text(value: unknown, name: string, max=4000): string {
@@ -83,8 +84,14 @@ export function shotPrompt(p:Project,index:number):string {
   return JSON.stringify({motionPlan:motionGuidance(s),physicsRules:PHYSICS_GUIDE,cameraSpeed:cameraSpeedSummary(s),soundCues:s.soundCues,performance:s.performance,shotIntent:s.intent,storyConstraints:p.storyContext?.guide,task:'cinematic shot',aspectRatio:p.ratio,durationSeconds:s.duration,bible:p.plan.bible,shot:s.description,dialogue:s.dialogue,sound:s.sound,shotSize:s.size,camera:{...s.camera,units:'meters relative to subject; x lateral, y height, z distance; look at subject origin',note:'camera path is creative guidance, provider may not support exact trajectory'},startState:s.startState,endState:s.endState,narrative:s.narrative,previousEndState:previousNarrativeShot(p.plan.shots,index)?.endState??null,referenceImage:s.referenceUrl??null,previousReferenceImage:referencePredecessor(p.plan.shots,index)?.referenceUrl??null,transition:s.transition});
 }
 export function invalidateFrom(p:Project,index:number):void {
-  if(!p.plan)return;const ids=new Set(p.plan.shots.slice(index).map(s=>s.id));
+  if(!p.plan)return;
+  // Snapshot the artifact graph before clearing media: the lineage record must
+  // describe what existed when the shots changed, not what was just deleted.
+  const changed = p.plan.shots.slice(index).map((s) => ({ id: s.id, kind: 'shot' as const }));
+  const affected = downstreamClosure(buildArtifactGraph(p), changed);
+  const ids=new Set(p.plan.shots.slice(index).map(s=>s.id));
   for(const s of p.plan.shots.slice(index)){delete s.referenceOrigin;delete s.referenceFilename;delete s.referenceUrl;delete s.videoUrl;delete s.referenceMode;delete s.videoMode;}
   p.jobs=p.jobs.map(j=>(ids.has(j.shotId)||j.group?.shots.some(s=>ids.has(s.id)))&&j.status!=='cancelled'?{...j,status:'cancelled',error:'分镜已修改，输出失效，请重新生成。'}:j);
+  if (p.production) recordInvalidation(p, changed, affected);
   p.revision++;
 }

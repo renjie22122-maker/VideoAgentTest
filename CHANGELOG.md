@@ -1,5 +1,26 @@
 # 更新记录
 
+## 2026-09-12 · Agent Runtime 内核重构（Runtime Refactor v1）
+
+本次不增加用户功能，只演进内部架构：把自动协作、命令处理和失效逻辑从两个巨型文件收敛为有边界的运行时模块，并引入 Task / Capability / Artifact 三个一等公民概念。所有既有测试保持通过，行为不变。
+
+### 新增
+
+- Agent Runtime 四层拆分：`lib/studio/agent/` 下 ObservationBuilder（上下文投影）、Planner（提案与决策校验）、ActionRegistry（白名单动作执行器）、RunController（步骤记账、去重、预算、失败标记）；`autopilot.ts` 收敛为门面，公共导出保持不变。
+- Command Registry：`lib/studio/commands/` 按阶段与领域拆分为全局、只读、核心、后置四组有序处理器；`server.ts` 只保留锁、载入、revision 守卫、分发、持久化与错误边界。
+- `AgentTask` 一等公民：每个自动步骤产生任务记录（岗位、能力、依赖、输入版本、结果），`pendingReview` 镜像为显式 `verify_storyboard` 复核任务（AUTHOR != VERIFIER 成为任务策略而非特殊字段）。
+- Role → Capability 解耦：`agent/capabilities.ts` 定义能力目录与默认岗位授权；决策仍输出 roleId 保持兼容，运行时派生 capability 用于任务记录与后续路由；自定义岗位安全回退到动作能力。
+- Artifact 依赖图：`artifact-graph.ts` 从作品推导 script → shot → prompt → video → qa 依赖与资产引用，提供传递下游闭包；`invalidateFrom` 与 `invalidateAssetMedia` 追加式记录失效血缘（artifactEvents），不改变原有清理行为。
+
+### 修复
+
+- 存储根目录改为按调用时环境解析，避免模块缓存把 `STUDIO_DATA_DIR` 钉死在首次加载值。
+
+### 文档与验证
+
+- 新增 agent-runtime、command-registry、agent-task、agent-capability、artifact-graph 五组契约测试；50 个测试文件、类型检查、代码规范与生产构建全部通过。
+- 架构文档补充 Runtime 内核分层、任务模型、能力模型与失效血缘说明。
+
 ## 2026-09-11 · 增量资产、协作交接与完成提醒
 
 ### 新增

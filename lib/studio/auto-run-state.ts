@@ -36,6 +36,8 @@ export type AutoRun = {
   stopReason?: AutoStopReason;
   summary?: string;
   pendingReview?: PendingAutoReview;
+  /** First-class task trail; runs saved before the task model simply have none. */
+  tasks?: import('./agent/task.ts').AgentTask[];
 };
 
 export const autoTaskContracts = [
