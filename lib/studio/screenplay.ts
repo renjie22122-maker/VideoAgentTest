@@ -9,19 +9,31 @@ export type StructuredScreenplay=Screenplay&{schemaVersion:2;theme:string;dramat
 const record=(v:unknown):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('剧本必须是结构化对象。');return v as Record<string,unknown>;};
 function array(v:unknown,name:string,min:number,max:number):unknown[]{if(!Array.isArray(v)||v.length<min||v.length>max)throw new Error(name+'数量应为 '+min+'–'+max+'。');return v;}
 const optionalText=(v:unknown,max=1000)=>typeof v==='string'?v.trim().slice(0,max):'';
+export class ScreenplayTimingError extends Error {
+ actual:number;target:number;
+ constructor(actual:number,target:number){super('场次时长合计 '+Number(actual.toFixed(2))+' 秒，目标 '+target+' 秒，相差 '+Number(Math.abs(actual-target).toFixed(2))+' 秒。');this.name='ScreenplayTimingError';this.actual=actual;this.target=target;}
+}
+export function applySceneTiming(input:unknown,raw:unknown,total:number):StructuredScreenplay{
+ const original=record(input),repair=record(raw);
+ if(!Array.isArray(original.scenes)||!Array.isArray(repair.scenes)||repair.scenes.length!==original.scenes.length)throw new Error('时长修复必须覆盖全部原场次，不能增删场次。');
+ const times=new Map<string,number>();
+ for(const item of repair.scenes){const scene=record(item);const id=text(scene.id,'场次 ID',50);if(times.has(id))throw new Error('时长修复场次 ID 重复。');times.set(id,finite(scene.duration,2,total,'场次秒数'));}
+ return validateScreenplay({...original,scenes:original.scenes.map(item=>{const scene=record(item);if(!times.has(String(scene.id)))throw new Error('时长修复缺少原场次。');return {...scene,duration:times.get(String(scene.id))};})},total);
+}
 export function validateScreenplay(input:unknown,total:number):StructuredScreenplay{
  const s=record(input);if(s.schemaVersion!==2)throw new Error('请先生成结构化剧本，再确认。旧版正文仍保留供参考。');
  const characters=array(s.characters,'人物',1,12).map(v=>{const c=record(v);return {id:text(c.id,'人物 ID',50),name:text(c.name,'人物名',100),description:text(c.description,'可见人物特征',1500),want:text(c.want,'人物目标',1000)};});
  const ids=new Set(characters.map(c=>c.id));if(ids.size!==characters.length)throw new Error('人物 ID 不能重复。');
- const scenes=array(s.scenes,'场次',1,12).map(v=>{const c=record(v);
+ const scenes=array(s.scenes,'场次',1,Math.max(12,Math.floor(total/2))).map(v=>{const c=record(v);
    if(!['INT','EXT','INT/EXT'].includes(String(c.interiorExterior)))throw new Error('场次需注明 INT、EXT 或 INT/EXT。');
    const cast=array(c.characters,'出场人物',0,12).map(v=>text(v,'出场人物 ID',50));if(cast.some(id=>!ids.has(id)))throw new Error('场次引用了未定义的人物。');
    const action=array(c.action,'动作段落',1,20).map(v=>text(v,'可拍摄动作',2000));
    const dialogue=array(c.dialogue,'对白',0,40).map(v=>{const d=record(v),id=text(d.characterId,'对白人物 ID',50);if(!cast.includes(id))throw new Error('对白人物必须列入该场出场人物，画外音也需登记。');const afterAction=finite(d.afterAction,0,action.length-1,'对白所接动作段落索引');if(!Number.isInteger(afterAction))throw new Error('对白动作索引必须为整数。');return {characterId:id,delivery:optionalText(d.delivery,200),line:text(d.line,'对白',1500),afterAction};});
-   return {id:text(c.id,'场次 ID',50),interiorExterior:c.interiorExterior as ScriptScene['interiorExterior'],location:text(c.location,'场景地点',300),timeOfDay:text(c.timeOfDay,'时间',100),duration:finite(c.duration,2,120,'场次秒数'),characters:cast,purpose:text(c.purpose,'场次目的',1500),conflict:text(c.conflict,'阻力或不确定性',1500),turn:text(c.turn,'场次变化',1500),action:array(c.action,'动作段落',1,20).map(v=>text(v,'可拍摄动作',2000)),dialogue,sound:text(c.sound,'声音设计',1000),endState:text(c.endState,'场末状态',1500)};
+   return {id:text(c.id,'场次 ID',50),interiorExterior:c.interiorExterior as ScriptScene['interiorExterior'],location:text(c.location,'场景地点',300),timeOfDay:text(c.timeOfDay,'时间',100),duration:finite(c.duration,2,total,'场次秒数'),characters:cast,purpose:text(c.purpose,'场次目的',1500),conflict:text(c.conflict,'阻力或不确定性',1500),turn:text(c.turn,'场次变化',1500),action:array(c.action,'动作段落',1,20).map(v=>text(v,'可拍摄动作',2000)),dialogue,sound:text(c.sound,'声音设计',1000),endState:text(c.endState,'场末状态',1500)};
  });
  if(new Set(scenes.map(c=>c.id)).size!==scenes.length)throw new Error('场次 ID 不能重复。');
- if(Math.abs(scenes.reduce((n,c)=>n+c.duration,0)-total)>.5)throw new Error('场次时长合计必须等于目标 '+total+' 秒。');
+ const actual=scenes.reduce((n,c)=>n+c.duration,0);
+ if(Math.abs(actual-total)>.5)throw new ScreenplayTimingError(actual,total);
  return {schemaVersion:2,title:text(s.title,'片名',100),logline:text(s.logline,'一句话故事',2000),synopsis:text(s.synopsis,'故事梗概',8000),theme:text(s.theme,'主题',1000),dramaticQuestion:text(s.dramaticQuestion,'核心悬念',1000),characters,scenes};
 }
 export const WRITER_GUIDE=`你负责可拍摄的短片文学剧本，后续导演会另行拆分镜头。

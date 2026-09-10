@@ -2,7 +2,7 @@ import type { Project, Question } from './types.ts';
 import { text } from './domain.ts';
 import { roleJSON } from './providers.ts';
 import { skillGuide } from './skills.ts';
-export type CreativeBrief={summary:string;known:{topic:string;value:string;evidence:string}[];assumptions:string[];ready:boolean;round:number;source:'model'|'demo';history:{question:string;answer:string}[]};
+export type CreativeBrief={decisions?:import('./brief-decisions.ts').BriefDecision[];summary:string;known:{topic:string;value:string;evidence:string}[];assumptions:string[];ready:boolean;round:number;source:'model'|'demo';history:{question:string;answer:string}[]};
 export type ClarificationResult={brief:CreativeBrief;questions:Question[]};
 function obj(v:unknown):Record<string,unknown>{if(!v||typeof v!=='object'||Array.isArray(v))throw new Error('创意分析格式无效。');return v as Record<string,unknown>;}
 export function clarificationSources(p:Project,history:CreativeBrief['history']){

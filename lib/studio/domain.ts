@@ -37,13 +37,13 @@ export function validateBible(value:unknown):Bible {
  return bible;
 }
 export function validatePlan(v:unknown):Plan {
-  const p=object(v),b=object(p.bible);if(!Array.isArray(p.shots)||p.shots.length<2||p.shots.length>24)throw new Error('分镜数量应为 2–24。');
+  const p=object(v),b=object(p.bible);if(!Array.isArray(p.shots)||p.shots.length<1)throw new Error('分镜至少需要 1 个镜头。');
   const bible=validateBible(b);
   return {title:text(p.title,'标题',100),logline:text(p.logline,'故事梗概',2000),synopsis:text(p.synopsis,'剧本',8000),bible,shots:p.shots.map(validateShot)};
 }
 export function demoPlan(p:Project):Plan {
   const a=p.answers,subject=a.subject||'创意中的主角',location=a.location||'创意中的场景',ending=a.ending||'按确认的创意完成核心事件',tone=a.tone||'遵循创意与回答';
-  const count=Math.max(3,Math.ceil(p.duration/6));
+  const count=Math.max(1,Math.min(120,Math.floor(p.duration/2),Math.ceil(p.duration/6)));
   const state:ContinuityState={pose:'主角在场景中，尚未开始主要动作',screenDirection:'left-to-right',wardrobe:subject,props:'沿用创意中的道具，位置保持不变',light:location+'；固定主光方向',axis:'A'};
   const beats=['建立环境与人物关系','接近主角，建立关注点','发现变化，建立动机','动作展开，情绪发生转折','展示反应，为结尾留白','完成关键动作并收束'];
   let prev=state;

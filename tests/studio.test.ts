@@ -36,6 +36,8 @@ void test('persistent workflow: HITL, queue deduplication, QA retry, assembly an
  await assert.rejects(()=>run('plan',{answers}),/澄清/);
  await run('clarify_answers',{answers:Object.fromEntries(p.questions.map(q=>[q.id,q.options?.[0]||'由编剧决定']))});
  assert.equal(p.brief!.ready,true);
+ await assert.rejects(()=>run('plan',{answers}),/逐条/);
+ await run('brief_decisions',{decisions:p.brief!.assumptions.map(suggestion=>({suggestion,choice:'accept'}))});
  await run('plan',{answers});assert.equal(p.production!.node,'script');assert.equal(p.plan,undefined);
  await run('approve_script',{script:p.production!.script});assert.equal(p.production!.node,'assets');
  await run('approve_assets',{bible:p.production!.assets!.bible,seed:42});assert.equal(p.plan!.shots.length,3);

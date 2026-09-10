@@ -1,6 +1,6 @@
 {
   "name": "frame-director-studio",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -11,7 +11,7 @@
     "start": "node --env-file-if-exists=.env node_modules/vinext/dist/cli.js dev --host 127.0.0.1",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint app components/shot-editor.tsx components/studio-preview.tsx components/raw-clip.tsx components/api-settings.tsx components/screenplay-editor.tsx components/clarification-panel.tsx components/skill-catalog.tsx components/asset-library.tsx components/asset-prompt-card.tsx components/asset-set-panel.tsx components/asset-upload.tsx lib/studio scripts tests vite.config.ts",
+    "lint": "oxlint app components/shot-editor.tsx components/studio-preview.tsx components/raw-clip.tsx components/api-settings.tsx components/screenplay-editor.tsx components/clarification-panel.tsx components/skill-catalog.tsx components/asset-library.tsx components/asset-prompt-card.tsx components/asset-set-panel.tsx components/asset-upload.tsx lib/studio scripts tests vite.config.ts components/auto-run-driver.tsx components/auto-pilot.tsx components/production-diagnostics.tsx components/video-preflight.tsx components/shot-video-controls.tsx components/shot-intent-view.tsx components/story-continuity.tsx components/group-video.tsx",
     "format": "oxfmt"
   },
   "dependencies": {

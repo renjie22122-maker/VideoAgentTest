@@ -1,11 +1,17 @@
+import {validateBriefDecisions,inheritBriefDecisions} from './brief-decisions.ts';
+import {referencePredecessor} from './narrative.ts';
+import {isReadOnlyCommand} from './command-policy.ts';
+import {validateAutoStep} from './auto-run-state.ts';
+import {buildQualityReport} from './quality-report.ts';
+import {projectAgents} from './team-config.ts';
 import { nextStoryContext,validateStoryGuide } from './story-context.ts';
 import { videoGroup } from './video-group.ts';
 import { mergeShotPair } from './shot-merge.ts';
 import { suggestVideoAssets,videoAssetChoices } from './video-asset-selection.ts';
 import { miniMaxBase } from './minimax-video.ts';
 import { requeueFailedJob } from './job-recovery.ts';
-import { autoStep, continuityFixDecision } from './autopilot.ts';
-import { resolveDuration } from './duration.ts';
+import { autoStep, continuityFixDecision, createAutoRun, stopAutoRun, failAutoRun } from './autopilot.ts';
+import { resolveDuration, refreshEstimatedDuration } from './duration.ts';
 import { MOTION_SCHEMA, validateMotion } from './motion.ts';
 import { runTeamReview } from './team-runtime.ts';
 import { validateAgentConfig } from './team-config.ts';
@@ -18,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Project, Job, Shot } from './types.ts';
 import { text, finite, validateShot, validatePlan, validateBible, checkContinuity, invalidateFrom } from './domain.ts';
-import { roleJSON, capabilities, generatePlan, submitMedia, pollMedia, mediaInput, writeScript, designAssets, reviewMedia, continuitySkill, compilerSkill, editorSkill, planAssetLibrary } from './providers.ts';
+import { videoPreview,currentVideoProfile,roleJSON, capabilities, generatePlan, submitMedia, pollMedia, mediaInput, writeScript, designAssets, reviewMedia, continuitySkill, compilerSkill, editorSkill, planAssetLibrary } from './providers.ts';
 import { initialProduction, transition, requireNode, reopenStoryboard } from './graph.ts';
 import { publicSettings, saveSettings, setting } from './settings.ts';
 import { validateScreenplay } from './screenplay.ts';
@@ -29,19 +35,19 @@ import { readImage } from './openai-images.ts';
 const root=path.resolve(process.env.STUDIO_DATA_DIR||'.studio');
 const file=path.join(root,'projects.json');
 let mutating=false;
-type Command={storyGuide?:unknown;neighborId?:string;videoInput?:Shot['videoInput'];regenerate?:boolean;agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
+type Command={decisions?:unknown;expectedRunId?:string;expectedStep?:number;findingIds?:string[];maxSteps?:number;storyGuide?:unknown;neighborId?:string;videoInput?:Shot['videoInput'];regenerate?:boolean;agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
 async function load():Promise<Project[]> {try{return JSON.parse(await readFile(file,'utf8'));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return [];throw new Error('项目存储无法读取，请检查 .studio/projects.json。');}}
 async function save(data:Project[]){await mkdir(root,{recursive:true});const tmp=file+'.tmp';await writeFile(tmp,JSON.stringify(data,null,2),'utf8');await rename(tmp,file);}
 function bump(p:Project){p.updatedAt=Date.now();}
 export async function dispatch(input:Command):Promise<unknown>{
   // Atomic file replacement lets readers see the last committed state during generation.
-  if(['status','settings','skills','list','get','shot_image_prompt'].includes(input.action??''))return handle(input);
+  if(isReadOnlyCommand(input.action??''))return handle(input);
   if(mutating)throw new Error('工作台正在处理上一项操作，请等待完成后再提交。可重新打开作品查看已保存结果。');
   mutating=true;
   try{return await handle(input);}finally{mutating=false;}
 }
 async function handle(input:Command):Promise<unknown>{
-  if(input.action==='status')return capabilities();
+  if(input.action==='status')return {...capabilities(),runtimeBusy:mutating};
   if(input.action==='settings')return publicSettings();
   if(input.action==='skills')return skillCatalog();
   const all=await load();
@@ -64,7 +70,10 @@ async function handle(input:Command):Promise<unknown>{
     const prepared=mediaInput(p,j) as {prompt:string;referenceImages:string[];model:string;referenceSelectionOmitted?:string[]};
     return {referenceSelectionOmitted:prepared.referenceSelectionOmitted,prompt:prepared.prompt,referenceImages:prepared.referenceImages,model:prepared.model,compiled:!!p.production?.prompts?.some(v=>v.shotId===input.shotId)};
   }
+  if(input.action==='quality_report')return buildQualityReport(p);
+  if(input.action==='video_preview')return videoPreview(p,newJob(p,input.shotId??'','video'));
   if(input.action==='get')return p;
+  if(input.action==='auto_step'&&validateAutoStep(p.production?.autoRun,input.expectedRunId,input.expectedStep)==='refresh')return p;
   if(input.action!=='poll'&&input.action!=='cancel'&&input.revision!==p.revision)throw new Error('项目已在其他窗口更改，请重新打开项目后再编辑。');
   if(p.production?.autoRun?.status==='running'&&!['auto_start','auto_step','auto_stop'].includes(input.action??''))throw new Error('请先停止自动任务，再手动修改作品。');
   if(input.action==='story_save'||input.action==='story_next'){
@@ -86,7 +95,7 @@ async function handle(input:Command):Promise<unknown>{
     if(!p.production?.scriptApproved||!p.plan)throw new Error('请先确认剧本并完成文字分镜。');
     if(p.jobs.some(j=>['running','queued'].includes(j.status)))throw new Error('请先等待或停止当前队列。');
     const group=videoGroup(p,input.shotId??'',input.neighborId??'');
-    if(p.mode==='live'&&(!miniMaxBase(setting('MEDIA_GATEWAY_URL'))||setting('VIDEO_MODEL')!=='MiniMax-H3'))throw new Error('文字加美术参考图联合生成需要原生 MiniMax-H3。');
+    if(p.mode==='live'&&(currentVideoProfile().id!=='minimax'||!miniMaxBase(setting('MEDIA_GATEWAY_URL'))||setting('VIDEO_MODEL')!=='MiniMax-H3'))throw new Error('文字加美术参考图联合生成需要原生 MiniMax-H3。');
     if(p.jobs.some(j=>j.group&&j.group.shots.some(s=>group.shots.some(g=>g.id===s.id))&&j.status==='failed'&&!j.remoteId))throw new Error('已有联合任务提交结果未知，请先核查供应商，不能直接重复提交。');
     p.jobs.push({...newJob(p,group.shots[0].id,'video'),independent:true,group});
     p.production.events.push({at:Date.now(),node:p.production.node,role:'用户',message:'用户直接批准多镜联合生成：'+group.shots.map(s=>s.id).join(' + ')+'；保存独立联合片段，不改写或批准其他分镜。'});
@@ -152,21 +161,21 @@ async function handle(input:Command):Promise<unknown>{
     p.brief=undefined;p.questions=[];delete p.plan;p.jobs=p.jobs.map(j=>({...j,status:'cancelled',error:'目标时长修改，需重新编剧和确认下游。'}));p.phase='clarify';p.revision++;
     p.production.events.push({at:Date.now(),node:'clarify',role:'制片',message:'目标时长改为 '+p.duration+' 秒，保留创意与回答，旧剧本及资产已归档，等待重新编剧。'});bump(p);await save(all);return p;
   }
-  if(['auto_start','auto_step','auto_stop','continuity_fix'].includes(input.action??'')){
+  if(['auto_start','auto_step','auto_stop','continuity_fix','quality_fix'].includes(input.action??'')){
     const g=p.production!;if(!g)throw new Error('作品未初始化。');
-    if(input.action==='auto_stop'){if(g.autoRun)g.autoRun.status='stopped';}
+    if(input.action==='auto_stop'){if(g.autoRun)stopAutoRun(g.autoRun);}
     else{
       if(p.jobs.some(j=>['running','queued'].includes(j.status))||g.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止媒体生成。');
       if(input.action==='auto_start'){
         if(g.autoRun?.status==='running')throw new Error('自动任务已经运行。');
-        g.autoRun={status:'running',steps:0,maxSteps:4,instruction:text(input.notes,'自动任务要求',2000),log:[]};
+        g.autoRun=createAutoRun(p,text(input.notes,'自动任务要求',2000),input.maxSteps??4);
       }else{
-        const assigned=input.action==='continuity_fix'?continuityFixDecision(p):undefined;
+        const assigned=input.action==='continuity_fix'?continuityFixDecision(p):input.action==='quality_fix'?qualityFixDecision(p,input.findingIds):undefined;
         if(!assigned&&g.autoRun?.status!=='running')throw new Error('自动任务未启动。');
         const backupDir=path.join(root,'auto-backups');await mkdir(backupDir,{recursive:true});await writeFile(path.join(backupDir,p.id+'-'+Date.now()+'.json'),JSON.stringify(p,null,2));
         const candidate=structuredClone(p);
-        if(assigned)candidate.production!.autoRun={status:'running',steps:0,maxSteps:1,instruction:assigned.reason,log:[]};
-        try{await autoStep(candidate,assigned);Object.assign(p,candidate);}catch(e){if(assigned)throw e;g.autoRun!.status='failed';g.autoRun!.error=e instanceof Error?e.message:'自动任务失败';}
+        if(assigned)candidate.production!.autoRun=createAutoRun(candidate,assigned.reason,2);
+        try{await autoStep(candidate,assigned);Object.assign(p,candidate);}catch(e){if(assigned)throw e;failAutoRun(g.autoRun!,e);}
       }
     }
     bump(p);await save(all);return p;
@@ -252,6 +261,15 @@ async function handle(input:Command):Promise<unknown>{
     bump(p);await save(all);return p;
   }
   if(p.production?.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止资产生成，再修改作品。');
+  if(input.action==='brief_decisions'){
+    requireNode(p,'clarify');
+    if(!p.brief)throw new Error('请先分析创意。');
+    p.brief={...p.brief,decisions:validateBriefDecisions(p.brief,input.decisions)};
+    p.answers.creative_suggestion_decisions=JSON.stringify(p.brief.decisions);
+    for(const q of p.questions){const value=input.answers?.[q.id];if(typeof value==='string')p.answers[q.id]=value.trim()?text(value,q.label,1500):'';}
+    refreshEstimatedDuration(p);
+    bump(p);await save(all);return p;
+  }
   if(['analyze_brief','clarify_answers','confirm_brief'].includes(input.action??'')){
     requireNode(p,'clarify');
     if(input.action!=='confirm_brief'&&(p.brief?.round??0)>=3)throw new Error('已完成三轮分析，请填写关键问题后确认当前理解继续，或创建新的创意。');
@@ -261,15 +279,16 @@ async function handle(input:Command):Promise<unknown>{
     if(input.action==='confirm_brief'){
       if(!p.brief||(p.brief.round<3&&!p.brief.ready))throw new Error('请先提交回答检查歧义。');
       p.brief={...p.brief,history,ready:true};p.questions=[];
-    }else {const result=await analyzeClarification({...p,answers},history);p.brief=result.brief;p.questions=result.questions;}
-    p.answers=answers;p.revision++;p.production!.skillVersions=Object.fromEntries(Object.entries(productionSkills).map(([id,s])=>[id,s.version]));
+    }else {const analysisProject={...p,answers};refreshEstimatedDuration(analysisProject);const result=await analyzeClarification(analysisProject,history);p.brief=inheritBriefDecisions(p.brief,result.brief);p.questions=result.questions;}
+    p.answers=answers;refreshEstimatedDuration(p);p.revision++;p.production!.skillVersions=Object.fromEntries(Object.entries(productionSkills).map(([id,s])=>[id,s.version]));
     p.production!.events.push({at:Date.now(),node:'clarify',role:'创意开发编辑',message:p.brief.ready?'关键歧义已处理，等待用户确认简报。':'已阅读创意与回答，提出 '+p.questions.length+' 个针对性问题。'});
   }else if(input.action==='plan'||input.action==='rewrite_script'){
     if(input.action==='plan')requireNode(p,'clarify','script');
     if(p.brief&&!p.brief.ready)throw new Error('请先完成针对性澄清并确认创意理解。');
     if(p.jobs.some(j=>j.status==='running'||j.status==='queued')||p.production?.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止生成任务。');
     const answers:Record<string,string>={...p.answers};for(const q of p.questions)answers[q.id]=text(input.answers?.[q.id],q.label,1500);
-    const timing=p.durationMode==='auto'?resolveDuration('auto',{idea:p.idea,answers}):resolveDuration(p.duration,p);const candidate={...p,answers,duration:timing.seconds};const script=await writeScript(candidate);p.duration=timing.seconds;p.durationReason=timing.reason;
+    // Use the saved target shown to the user; never change it inside a generation request.
+    const candidate={...p,answers};const script=await writeScript(candidate);
     const previous=p.production!.script;const history=p.production!.scriptHistory??[];if(previous)history.push({at:Date.now(),script:previous});
     if(input.action==='rewrite_script'){const events=p.production!.events;p.production={...initialProduction(),events};delete p.plan;p.phase='clarify';p.jobs=p.jobs.map(j=>({...j,status:'cancelled',error:'剧本重写后原素材已失效。'}));}
     p.answers=answers;p.production!.script=script;p.production!.scriptHistory=history.slice(-10);p.production!.skillVersions=Object.fromEntries(Object.entries(productionSkills).map(([id,s])=>[id,s.version]));p.title=script.title;p.revision++;transition(p,'script','编剧完成结构化剧本，等待人工确认。');
@@ -327,7 +346,12 @@ async function handle(input:Command):Promise<unknown>{
     if(input.kind==='image'&&p.mode==='live'&&setting('IMAGE_PROVIDER')==='fal')requireAssetSets(p);
     const targets=input.shotId?p.plan.shots.filter(s=>s.id===input.shotId):p.plan.shots;
     if(!targets.length)throw new Error('镜头不存在。');
-    if(input.kind==='video')for(const s of targets){const mode=s.videoInput?.mode??'first';if(p.mode==='live'&&mode!=='first'&&!miniMaxBase(setting('MEDIA_GATEWAY_URL')))throw new Error('这些视频模式目前需要原生 MiniMax H3 接口。');if(!['text','references'].includes(mode)&&(p.mode==='live'?!s.referenceUrl:s.referenceMode!=='demo'))throw new Error(s.id+' 缺少参考图首帧；可选择文字或美术参考图模式。');if(mode==='first_last'&&!s.videoInput?.lastFrameUrl)throw new Error(s.id+' 缺少尾帧。');}
+    if(input.kind==='video')for(const s of targets){const mode=s.videoInput?.mode??'first';if(!['text','references'].includes(mode)&&(p.mode==='live'?!s.referenceUrl:s.referenceMode!=='demo'))throw new Error(s.id+' 缺少参考图首帧；可选择文字或美术参考图模式。');if(mode==='first_last'&&!s.videoInput?.lastFrameUrl)throw new Error(s.id+' 缺少尾帧。');}
+    if(input.kind==='video'&&p.mode==='live')for(const shot of targets){
+      const existing=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind==='video'&&j.revision===p.revision);
+      if(!input.regenerate&&existing?.remoteId&&existing.remoteId!=='fal-pending')continue;
+      const preview=videoPreview(p,newJob(p,shot.id,'video'));if(preview.issues.length)throw new Error(shot.id+'：'+preview.issues.join(' '));
+    }
     if(input.regenerate){
       if(!input.shotId)throw new Error('重新生成需指定单个镜头。');
       const s=targets[0];const latest=p.jobs.findLast(j=>j.shotId===s.id&&j.kind===input.kind);
@@ -366,13 +390,13 @@ async function tick(p:Project,persist:()=>Promise<void>){
   const job=p.jobs.find(j=>j.status==='running')||p.jobs.find(j=>j.status==='queued');if(!job||!p.plan)return;
   // A sequential queue ensures that downstream requests receive the previous output.
   const index=p.plan.shots.findIndex(s=>s.id===job.shotId),shot=p.plan.shots[index];
-  const previous=index>0?p.plan.shots[index-1]:undefined;
-  if(previous&&!job.independent&&(job.kind==='image'||(!shot.videoInput&& !miniMaxBase(setting('MEDIA_GATEWAY_URL'))))){const ready=job.kind==='image'?(job.mode==='demo'?previous.referenceMode==='demo':!!previous.referenceUrl):(job.mode==='demo'?previous.videoMode==='demo':!!previous.videoUrl);if(!ready){job.status='failed';job.error='上一镜头尚未成功，请先重试上游任务。';return;}}
+  const previous=referencePredecessor(p.plan.shots,index);
+  if(previous&&!job.independent&&(job.kind==='image'||(!shot.videoInput&&currentVideoProfile().id==='gateway'))){const ready=job.kind==='image'?(job.mode==='demo'?previous.referenceMode==='demo':!!previous.referenceUrl):(job.mode==='demo'?previous.videoMode==='demo':!!previous.videoUrl);if(!ready){job.status='failed';job.error='上一镜头尚未成功，请先重试上游任务。';return;}}
   try{
     if(job.status==='queued'){
       job.status='running';job.startedAt=Date.now();job.input=mediaInput(p,job);
       await persist();
-      if(job.mode==='live'&&!job.remoteId){if(job.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'){job.remoteId='fal-pending';await persist();}job.remoteId=await submitMedia(p,job);await persist();}
+      if(job.mode==='live'&&!job.remoteId){if(job.kind==='video'&&!job.group){const preview=videoPreview(p,job);if(preview.issues.length)throw new Error(preview.issues.join(' '));}job.remoteId=await submitMedia(p,job,async()=>{const previousId=job.remoteId;job.remoteId='fal-pending';try{await persist();}catch(e){job.remoteId=previousId;throw e;}});await persist();}
       return;
     }
     if(Date.now()-(job.startedAt||0)>30*60*1000){job.status='failed';job.error='生成超过 30 分钟，请在供应商端核查任务。';return;}
@@ -417,3 +441,13 @@ export function studioMiddleware(req:IncomingMessage,res:ServerResponse,next:()=
   });
 }
 
+
+function qualityFixDecision(p:Project,ids:unknown){
+ if(!p.plan||!p.production?.scriptApproved)throw new Error('先确认剧本并完成分镜，再修订制作诊断问题。');
+ if(p.mode==='demo')throw new Error('自动修订需要真实语言模型；演示可查看诊断并手动修改。');
+ if(!Array.isArray(ids)||!ids.length||ids.length>20||ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length)throw new Error('请选择 1–20 项具体问题。');
+ const report=buildQualityReport(p);const findings=report.findings.filter(f=>ids.includes(f.id));if(findings.length!==ids.length)throw new Error('问题列表已变化，请刷新后重新选择。');
+ if(findings.some(f=>f.owner==='writer'||!f.shotIds.length))throw new Error('剧本或全局问题需先在对应步骤修改，不能通过改写分镜绕过。');
+ const role=projectAgents(p).find(r=>r.enabled&&r.id==='storyboard')??projectAgents(p).find(r=>r.enabled&&r.id==='director');if(!role)throw new Error('请先启用分镜导演或导演岗位。');
+ return {roleId:role.id,action:'revise_shots' as const,reason:'按本次用户选择的制作诊断问题修订分镜，重点问题 ID：'+ids.join('、')+'。依据当前确定性报告逐项处理，仅修改可证实的问题；保留创意、已确认剧本、对白、每场时长。不要为了消除风险提示而机械改掉有动机的镜头表达。修订后由另一岗位复核。'};
+}
