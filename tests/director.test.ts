@@ -17,7 +17,7 @@ function fixture():Project{
 void test('director identifies shot, scene, order and timing errors while preserving confirmed metadata',()=>{
  const p=fixture(),plan=demoPlan(p);
  assert.equal(validateDirectorPlan({shots:plan.shots,bible:{},title:'改写'},p).title,p.production!.script!.title);
- const invalid=structuredClone(plan);invalid.shots[1].duration=16;assert.throws(()=>validateDirectorPlan(invalid,p),/第 2 镜.*镜头时长/);
+ const invalid=structuredClone(plan);invalid.shots[1].duration=3601;assert.throws(()=>validateDirectorPlan(invalid,p),/第 2 镜.*镜头时长/);
  invalid.shots[1].duration=6;invalid.shots[1].scene='教室';assert.throws(()=>validateDirectorPlan(invalid,p),/第 2 镜.*未知场次/);
  invalid.shots[1].scene='scene-1';invalid.shots[1].duration=5;assert.throws(()=>validateDirectorPlan(invalid,p),/scene-1.*23 秒.*24 秒/);
  const first=p.production!.script!.scenes![0];p.production!.script!.scenes=[{...first,duration:12},{...first,id:'scene-2',duration:12}];

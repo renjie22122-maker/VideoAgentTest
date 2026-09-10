@@ -26,6 +26,7 @@ export function prepareFalVideo(p: Project, j: Job, audio: boolean) {
     );
   const s = p.plan?.shots.find((s) => s.id === j.shotId);
   if (!s) throw new Error('镜头不存在。');
+  if(!Number.isInteger(s.duration)||s.duration<3||s.duration>15)throw new Error('Kling 单次请求需要 3–15 整数秒；长镜头需通过串行调度提交。');
   const errors = videoPreflight(p, s, videoProfile({ provider: 'fal-kling' }));
   if (errors.length) throw new Error(errors.join(' '));
   const mode = s.videoInput?.mode ?? 'first';

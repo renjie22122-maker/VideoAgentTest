@@ -7,7 +7,7 @@ import { MOTION_SCHEMA } from './motion.ts';
 import { demoPlan, validatePlan, validateShot } from './domain.ts';
 import type { Project, Plan } from './types.ts';
 
-export const DIRECTOR_SCHEMA = SOUND_SCHEMA+PERFORMANCE_SCHEMA+NARRATIVE_SCHEMA+INTENT_SCHEMA+MOTION_SCHEMA+`只输出 {"shots":[...]}。每镜必填 scene（剧本场次 ID，不是地点名称）、title（1–100 字）、beat（1–1000 字）、description（1–4000 字）、dialogue（字符串）、sound（字符串）、duration（2–15 秒的数字）、size（wide/medium/close）、transition（cut/dissolve）、camera、startState、endState。
+export const DIRECTOR_SCHEMA = SOUND_SCHEMA+PERFORMANCE_SCHEMA+NARRATIVE_SCHEMA+INTENT_SCHEMA+MOTION_SCHEMA+`只输出 {"shots":[...]}。每镜必填 scene（剧本场次 ID，不是地点名称）、title（1–100 字）、beat（1–1000 字）、description（1–4000 字）、dialogue（字符串）、sound（字符串）、duration（2–3600 秒的数字；普通镜头建议不超过15秒，一镜到底按实际叙事时长分配）、size（wide/medium/close）、transition（cut/dissolve）、camera、startState、endState。
 camera={movement:fixed/push/pull/track/orbit,lens:18–135 的数字,start:{x,y,z},end:{x,y,z},easing:linear/ease-in-out}。x 在 -10–10，y 在 0.1–10，z 在 0.1–15；均为数字。
 startState 和 endState 都必须包含 pose（1–500 字）、screenDirection（left-to-right/right-to-left/static）、wardrobe、props、light（各 1–1000 字的字符串，无道具写“无”）、axis（A/B）。枚举必须原样使用，不能翻译为中文。全片 镜头数量由叙事和总时长决定。不要重新输出或改写剧本、美术设定。
 默认按 sceneTiming 顺序拆分每个场次；仅 storyContext.guide.editingMode=parallel 时允许有依据的跨场交叉剪辑，逐场总时长仍须匹配。，每场镜头时长合计与该场秒数一致，全片合计等于 duration。不得通过跳过场次或截断动作来凑时长。`;

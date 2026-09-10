@@ -30,13 +30,14 @@ export function prepareMiniMax(p:Project,j:Job,model:string){
  if(prompt.length>7000)throw new Error('视频提示词超过 H3 的 7000 字限制，请精简镜头描述。');
  return {prompt,images,shot,mode,timing};
 }
-export async function submitMiniMax(p:Project,j:Job,base:string,model:string,key:string,request:Request){
+export async function submitMiniMax(p:Project,j:Job,base:string,model:string,key:string,request:Request,beforeSubmit?:()=>Promise<void>){
  const {prompt,images,mode,timing}=prepareMiniMax(p,j,model);
  j.renderTiming=timing;
  const content:({type:string;text:string}|{type:string;image_url:{url:string};role:string})[]=[{type:'text',text:prompt}];
  for(const image of images){let url=image.url;const match=/^\/api\/studio-images\/([a-f0-9-]{36})\.(png|jpg|webp)$/.exec(url);if(match)url='data:image/'+(match[2]==='jpg'?'jpeg':match[2])+';base64,'+(await readImage(match[1],match[2])).toString('base64');if(!url.startsWith('data:image/')&&!url.startsWith('https://'))throw new Error('参考图必须为 HTTPS 图片或本地已存图片。');content.push({type:'image_url',image_url:{url},role:image.role});}
  const input={model,content,duration:timing.requestSeconds,resolution:'768P',ratio:mode==='first'||mode==='first_last'?'adaptive':p.ratio};
  if(JSON.stringify(input).length>64*1024*1024)throw new Error('视频请求超过 64 MB，请减少参考图。');
+ await beforeSubmit?.();
  const result=await request(base+'/v2/video_generation',input,key);
  if(typeof result.task_id!=='string'||!result.task_id||result.task_id.length>300)throw new Error('MiniMax 未返回有效任务 ID，请检查供应商记录后再重试。');
  return 'minimax-h3:'+encodeURIComponent(base)+':'+encodeURIComponent(result.task_id);

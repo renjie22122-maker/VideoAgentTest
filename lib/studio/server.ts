@@ -1,3 +1,5 @@
+import {tickLongTake} from './take-runner.ts';
+import {serveTakeVideo,requireFFmpeg} from './take-media.ts';
 import {validateBriefDecisions,inheritBriefDecisions} from './brief-decisions.ts';
 import {referencePredecessor} from './narrative.ts';
 import {isReadOnlyCommand} from './command-policy.ts';
@@ -71,7 +73,7 @@ async function handle(input:Command):Promise<unknown>{
     return {referenceSelectionOmitted:prepared.referenceSelectionOmitted,prompt:prepared.prompt,referenceImages:prepared.referenceImages,model:prepared.model,compiled:!!p.production?.prompts?.some(v=>v.shotId===input.shotId)};
   }
   if(input.action==='quality_report')return buildQualityReport(p);
-  if(input.action==='video_preview')return videoPreview(p,newJob(p,input.shotId??'','video'));
+  if(input.action==='video_preview'){const preview=videoPreview(p,newJob(p,input.shotId??'','video'));const shot=p.plan?.shots.find(s=>s.id===input.shotId);if(p.mode==='live'&&shot&&shot.duration>(preview.profile.maxSeconds??Infinity))try{await requireFFmpeg();}catch(e){preview.issues.push(e instanceof Error?e.message:'本地视频处理工具未就绪');}return preview;}
   if(input.action==='get')return p;
   if(input.action==='auto_step'&&validateAutoStep(p.production?.autoRun,input.expectedRunId,input.expectedStep)==='refresh')return p;
   if(input.action!=='poll'&&input.action!=='cancel'&&input.revision!==p.revision)throw new Error('项目已在其他窗口更改，请重新打开项目后再编辑。');
@@ -350,12 +352,15 @@ async function handle(input:Command):Promise<unknown>{
     if(input.kind==='video'&&p.mode==='live')for(const shot of targets){
       const existing=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind==='video'&&j.revision===p.revision);
       if(!input.regenerate&&existing?.remoteId&&existing.remoteId!=='fal-pending')continue;
+      if(shot.duration>(currentVideoProfile().maxSeconds??Infinity))await requireFFmpeg();
       const preview=videoPreview(p,newJob(p,shot.id,'video'));if(preview.issues.length)throw new Error(shot.id+'：'+preview.issues.join(' '));
     }
     if(input.regenerate){
       if(!input.shotId)throw new Error('重新生成需指定单个镜头。');
       const s=targets[0];const latest=p.jobs.findLast(j=>j.shotId===s.id&&j.kind===input.kind);
       if(latest&&['queued','running'].includes(latest.status))throw new Error('此镜头正在生成，请勿重复提交。');
+      if(latest?.longTake?.parts.some(part=>part.submitted&&!part.remoteId))throw new Error('长镜头分段提交结果未知，请先核查供应商记录；停止队列不代表远端取消，不能直接重新生成。');
+      if(latest?.longTake?.parts.some(part=>part.remoteId&&!part.outputUrl&&!part.failed))throw new Error('长镜头还有已提交但未收回的分段，请先恢复查询，不能重复提交整镜。');
       if(latest?.remoteId==='fal-pending')throw new Error('上次提交结果未知，请先核查供应商记录。');
       if(latest?.status==='failed')throw new Error('失败任务请使用本镜生成 / 恢复查询，不能绕过重试保护。');
       p.jobs.push({...newJob(p,s.id,input.kind),independent:true});
@@ -367,7 +372,7 @@ async function handle(input:Command):Promise<unknown>{
     for(const shot of targets){
       if(input.kind==='image'&&shot.referenceUrl)continue;
       if(p.jobs.some(j=>j.shotId===shot.id&&j.kind===input.kind&&['queued','running','succeeded'].includes(j.status)))continue;
-      const failed=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind===input.kind&&j.status==='failed'&&j.revision===p.revision);
+      const failed=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind===input.kind&&(j.status==='failed'||(j.status==='cancelled'&&!!j.longTake))&&j.revision===p.revision);
       if(failed){
         requeueFailedJob(failed,p.production!.maxRetries);if(input.shotId)failed.independent=true;continue;
       }
@@ -393,6 +398,7 @@ async function tick(p:Project,persist:()=>Promise<void>){
   const previous=referencePredecessor(p.plan.shots,index);
   if(previous&&!job.independent&&(job.kind==='image'||(!shot.videoInput&&currentVideoProfile().id==='gateway'))){const ready=job.kind==='image'?(job.mode==='demo'?previous.referenceMode==='demo':!!previous.referenceUrl):(job.mode==='demo'?previous.videoMode==='demo':!!previous.videoUrl);if(!ready){job.status='failed';job.error='上一镜头尚未成功，请先重试上游任务。';return;}}
   try{
+    if(job.kind==='video'&&!job.group&&job.mode==='live'&&(job.longTake||shot.duration>(currentVideoProfile().maxSeconds??Infinity))){await tickLongTake(p,job,persist);return;}
     if(job.status==='queued'){
       job.status='running';job.startedAt=Date.now();job.input=mediaInput(p,job);
       await persist();
@@ -407,7 +413,7 @@ async function tick(p:Project,persist:()=>Promise<void>){
     }
     // Persist the idempotency key before submission; resubmission after a crash uses the same key.
     if(!job.remoteId){job.remoteId=await submitMedia(p,job);return;}
-    if(job.remoteId==='fal-pending')throw new Error('上次 fal 提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
+    if(job.remoteId==='fal-pending')throw new Error('上次供应商提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
     const result=await pollMedia(job);job.status=result.status;job.error=result.error;
     if(result.status==='succeeded'){job.outputUrl=result.outputUrl;job.finishedAt=Date.now();if(job.group)return;if(job.kind==='image'){shot.referenceUrl=result.outputUrl;shot.referenceMode='live';shot.referenceOrigin='generated';}else if(await reflect(p,job)){shot.videoUrl=result.outputUrl;shot.videoMode='live';}}
   }catch(e){job.status='failed';job.error=e instanceof Error?e.message:'生成失败';}
@@ -423,6 +429,13 @@ async function reflect(p:Project,j:Job):Promise<boolean>{
   p.jobs.unshift({...newJob(p,j.shotId,'video'),qaRetries:attempt+1});return false;
 }
 export function studioMiddleware(req:IncomingMessage,res:ServerResponse,next:()=>void){
+  if(req.url?.startsWith('/api/studio-videos/')){
+    const match=/^\/api\/studio-videos\/([a-f0-9-]{36})\.mp4$/.exec(req.url);
+    if(!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host||'')||req.headers['sec-fetch-site']==='cross-site'){res.writeHead(403);res.end();return;}
+    if(req.method!=='GET'||!match){res.writeHead(404);res.end();return;}
+    void serveTakeVideo(match[1],req,res).catch(()=>{if(!res.headersSent){res.writeHead(404);res.end();}else res.destroy();});return;
+  }
+
   if(req.url?.startsWith('/api/studio-images/')){
     const match=/^\/api\/studio-images\/([a-f0-9-]{36})\.(png|jpg|webp)$/.exec(req.url);
     if(!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host||'')||req.headers['sec-fetch-site']==='cross-site'){res.writeHead(403);res.end();return;}

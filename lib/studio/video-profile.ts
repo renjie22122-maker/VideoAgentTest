@@ -1,3 +1,4 @@
+import {planLongTake} from './long-take.ts';
 import {miniMaxTiming} from './render-timing.ts';
 import type { Project, Shot } from './types.ts';
 export type VideoProfile = {
@@ -97,7 +98,9 @@ export function videoPreflight(
           .join(' / ') +
         '。',
     );
-  if(profile.id==='minimax'){try{miniMaxTiming(s.duration,profile.model);}catch(e){errors.push(e instanceof Error?e.message:'时长无效。');}}
+  const long=!!profile.maxSeconds&&s.duration>profile.maxSeconds;
+  if(long){try{planLongTake(s,profile.minSeconds,profile.maxSeconds);}catch(e){errors.push(e instanceof Error?e.message:'长镜头分段无效。');}}
+  else if(profile.id==='minimax'){try{miniMaxTiming(s.duration,profile.model);}catch(e){errors.push(e instanceof Error?e.message:'时长无效。');}}
   else if (
     profile.minSeconds !== undefined &&
     (s.duration < profile.minSeconds ||
