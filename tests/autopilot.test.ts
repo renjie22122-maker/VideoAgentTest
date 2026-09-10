@@ -162,12 +162,16 @@ void test('automatic steps are transactional, honor model routing, and require s
   const failedSnapshot = await readFile(path.join(dir, 'projects.json'), 'utf8');
   const failedReplay = await dispatch({ id: p.id, revision: p.revision, action: 'auto_step', expectedRunId: firstRunId, expectedStep: 0 }) as Project;
   assert.deepEqual(failedReplay, next);
-  assert.equal(models.length, 2);
+  // Capability enforcement: the producer is not granted write_screenplay, so
+  // the policy rejects before any worker model call — no second LLM request.
+  assert.equal(models.length, 1);
+  assert.match(next.production!.autoRun!.error ?? '', /未授予/);
   assert.equal(await readFile(path.join(dir, 'projects.json'), 'utf8'), failedSnapshot);
   await act('auto_start', { notes: '改进剧本' });
   const secondRunId = current.production!.autoRun!.id!;
   await assert.rejects(dispatch({ id: p.id, revision: p.revision, action: 'auto_step', expectedRunId: firstRunId, expectedStep: 0 }), /已更换/);
-  assert.equal(models.length, 2);
+  // First run made one call (supervisor only — its worker call was refused by policy).
+  assert.equal(models.length, 1);
   responses = [
     { roleId: 'writer', action: 'write_script', reason: '完善剧本' },
     { ...demoScreenplay(p), title: '雨后' },
@@ -185,7 +189,8 @@ void test('automatic steps are transactional, honor model routing, and require s
   const backupsBeforeReplay = await readdir(path.join(dir, 'auto-backups'));
   const successReplay = await dispatch({ id: p.id, revision: 1, action: 'auto_step', expectedRunId: secondRunId, expectedStep: 0 }) as Project;
   assert.deepEqual(successReplay, JSON.parse(JSON.stringify(next)));
-  assert.equal(models.length, 4);
+  // 1 (policy-refused first run) + 2 (writer run); the stale replay adds none.
+  assert.equal(models.length, 3);
   assert.equal(await readFile(path.join(dir, 'projects.json'), 'utf8'), approvedGateSnapshot);
   assert.deepEqual(await readdir(path.join(dir, 'auto-backups')), backupsBeforeReplay);
   p.revision = next.revision;
@@ -197,10 +202,11 @@ void test('automatic steps are transactional, honor model routing, and require s
   assert.equal(next.production!.autoRun!.steps, 1);
   const runningReplay = await dispatch({ id: p.id, revision: p.revision, action: 'auto_step', expectedRunId: thirdRunId, expectedStep: 0 }) as Project;
   assert.deepEqual(runningReplay, JSON.parse(JSON.stringify(next)));
-  assert.equal(models.length, 6);
+  // 1 + 2 + 2 (supervisor + reviewer); the stale replay adds none.
+  assert.equal(models.length, 5);
   next = await act('auto_stop');
   assert.equal(next.production!.autoRun!.status, 'stopped');
-  assert.equal(models.length, 6);
+  assert.equal(models.length, 5);
 });
 
 void test('asset candidates allow text collaboration while images remain unapproved; identical designs do not accumulate', async () => {

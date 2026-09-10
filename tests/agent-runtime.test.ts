@@ -5,6 +5,7 @@ import {
   registeredAgentActions,
   agentActions,
   buildObservation,
+  describeAvailableActions,
   planDecision,
   beginStep,
   finishStep,
@@ -81,6 +82,26 @@ void test('observation projects only current-revision text and never transport m
   assert.equal(typeof observation.qualityReport.version, 'number');
   // Context projection must not leak job/media transport state.
   assert.equal(JSON.stringify(observation).includes('videoUrl'), false);
+});
+
+void test('planner observation carries the data-driven action catalog', () => {
+  const p = project();
+  p.plan = demoPlan(p);
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: false };
+  const run = createAutoRun(p, '检查文本');
+  const base = buildObservation(p, run);
+  const observation = {
+    ...base,
+    availableActions: describeAvailableActions(base.roles, p),
+  };
+  const catalog = observation.availableActions;
+  assert.equal(catalog.length, 5);
+  const revise = catalog.find((a) => a.action === 'revise_shots')!;
+  assert.equal(revise.allowed, true);
+  assert.equal(revise.requiresVerification, true);
+  assert.ok(revise.effects.includes('approvals'));
+  // roleCapabilities reflects declared-or-default grants per role.
+  assert.ok(observation.roleCapabilities.writer.some((c) => c.id === 'write_screenplay'));
 });
 
 void test('planner pause keeps the pending review gate and never consumes a step', async () => {

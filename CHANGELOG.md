@@ -1,5 +1,25 @@
 # 更新记录
 
+## 2026-09-12 · Runtime 内核第二阶段：Capability 授权、Task 调度与 Policy Engine
+
+延续上一版内核拆分，把 Task / Capability / Action 从“结构存在”变成“真正掌握运行权”。行为唯一有意的收紧：自定义岗位不再通过回退获得执行权限；被策略拒绝的决策不会触达任何模型调用。
+
+### 新增
+
+- **Capability 授权化**：每个动作声明 `requiredCapabilities / effects / requiresVerification`；Policy Engine（`agent/policy.ts`）成为允许/禁止的单一裁决点，岗位必须显式声明或内置默认授予所需能力，自定义岗位未声明即拒绝。`AgentConfig` 新增 `capabilities` 字段并严格校验。
+- **Task Scheduler**（`agent/scheduler.ts`）：`dependsOn` 成为就绪判定标准，预规划的 `verify_storyboard` 任务在依赖满足后先于 LLM 调度执行；`Capability Router`（`agent/router.ts`）按能力授权挑选执行者，验证者选择顺序与历史行为一致（reviewer → continuity → director）。
+- **Action 元数据化**：每个动作附带描述、能力、效果与复核要求，以 `availableActions`（含 allowed 与理由）注入 Observation，为瘦身 planner prompt 铺路。
+- **Artifact Manifest**（`artifactManifest`）：依据失效血缘输出每个存续产物的 current / stale / archived 状态，历史不删除。
+
+### 修复
+
+- 未经授权的决策现在在 worker 模型调用之前被拒绝，不再产生任何费用。
+
+### 文档与验证
+
+- 新增 agent-policy、agent-scheduler 两组契约测试并更新既有 capability / autopilot 测试；52 个测试文件、类型检查、代码规范与生产构建全部通过。
+- 架构文档补充 Policy Engine、Scheduler、能力授权与 manifest 状态语义；不变量新增“能力是授权不是描述”。
+
 ## 2026-09-12 · Agent Runtime 内核重构（Runtime Refactor v1）
 
 本次不增加用户功能，只演进内部架构：把自动协作、命令处理和失效逻辑从两个巨型文件收敛为有边界的运行时模块，并引入 Task / Capability / Artifact 三个一等公民概念。所有既有测试保持通过，行为不变。

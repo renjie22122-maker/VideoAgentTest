@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildArtifactGraph, downstreamClosure, recordInvalidation } from '../lib/studio/artifact-graph.ts';
+import { buildArtifactGraph, downstreamClosure, recordInvalidation, artifactManifest } from '../lib/studio/artifact-graph.ts';
 import { invalidateFrom, demoPlan } from '../lib/studio/domain.ts';
 import { invalidateAssetMedia } from '../lib/studio/asset-catalog.ts';
 import { demoScreenplay } from '../lib/studio/screenplay.ts';
@@ -132,4 +132,22 @@ void test('the invalidation ledger is append-only and bounded', () => {
   for (let i = 0; i < 105; i++) recordInvalidation(p, [{ id: 'x' + i, kind: 'asset' }], []);
   assert.equal(p.production!.artifactEvents!.length, 100);
   assert.equal(p.production!.artifactEvents![0].changed[0].id, 'x5');
+});
+
+void test('the artifact manifest marks surviving downstream artifacts stale without deleting history', () => {
+  const p = project();
+  const before = buildArtifactGraph(p);
+  const status = (kind: string, id: string) =>
+    before.nodes.find((n) => n.ref.kind === kind && n.ref.id === id)!.status;
+  assert.equal(status('video', 'shot-1'), 'current');
+  // A recorded asset change makes every surviving downstream artifact stale.
+  recordInvalidation(p, [{ id: 'asset-renata', kind: 'asset' }], []);
+  const manifest = artifactManifest(p);
+  const byKey = new Map(manifest.map((n) => [n.ref.kind + ':' + n.ref.id, n.status]));
+  assert.equal(byKey.get('shot:shot-1'), 'stale');
+  assert.equal(byKey.get('prompt:shot-1'), 'stale');
+  assert.equal(byKey.get('video:shot-1'), 'stale');
+  assert.equal(byKey.get('qa:shot-1'), 'stale');
+  assert.equal(byKey.get('shot:shot-2'), 'current');
+  assert.equal(byKey.get('asset:asset-old'), 'archived');
 });

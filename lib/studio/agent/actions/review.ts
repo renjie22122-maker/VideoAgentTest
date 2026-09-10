@@ -10,6 +10,10 @@ import type { AgentAction } from './types.ts';
  */
 export const reviewAction: AgentAction = {
   id: 'review',
+  description: '部门文本会审：按当前修订出具结构化报告，不修改作品，不声称看过画面。',
+  requiredCapabilities: ['review_story', 'review_camera', 'review_continuity', 'review_qa'],
+  effects: ['teamReports'],
+  requiresVerification: false,
   async execute(ctx) {
     const { project: p, run, decision, requiredReview, entry } = ctx;
     const { report } = await runTeamReview(p, decision.roleId, {

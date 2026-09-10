@@ -35,7 +35,7 @@ function recordTask(
     kind: taskKindForAction[decision.action],
     status: 'running',
     ownerRoleId: role?.id ?? 'producer',
-    capability: capabilityForDecision(role?.id ?? 'producer', decision.action),
+    capability: capabilityForDecision(role, decision.action),
     createdBy,
     dependsOn: [],
     targetShotIds: [],

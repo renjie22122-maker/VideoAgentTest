@@ -7,6 +7,10 @@ import type { AgentAction } from './types.ts';
  */
 export const stopAction: AgentAction = {
   id: 'stop',
+  description: '停止本轮协作并说明剩余事项；完成声明仍需通过确定性检查。',
+  requiredCapabilities: [],
+  effects: [],
+  requiresVerification: false,
   async execute(ctx) {
     const { project: p, run, decision, entry } = ctx;
     const remaining = unresolvedFindings(p);

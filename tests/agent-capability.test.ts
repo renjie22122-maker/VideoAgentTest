@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   autoStep,
   createAutoRun,
+  validateAutoDecision,
   capabilityForDecision,
   capabilitiesForRole,
   defaultRoleCapabilities,
@@ -47,12 +48,56 @@ void test('every built-in role has a unique capability grant and known roles rou
   assert.equal(capabilityForDecision('producer', 'stop'), 'plan_work');
 });
 
-void test('unknown custom roles degrade to the action capability instead of failing', () => {
+void test('custom roles never gain permission by fallback; declared capabilities are honored', () => {
+  // Descriptive metadata still falls back (task records stay informative)…
   assert.equal(capabilityForDecision('custom_role', 'revise_shots'), 'revise_storyboard');
-  assert.equal(capabilityForDecision('custom_role', 'write_script'), 'write_screenplay');
-  assert.equal(capabilityForDecision('custom_role', 'design_assets'), 'design_art');
-  assert.equal(capabilityForDecision('custom_role', 'review'), 'review_story');
-  assert.deepEqual(capabilitiesForRole('custom_role'), []);
+  // …but authorization does not: an enabled custom role without declared
+  // capabilities is refused by the policy engine.
+  const p = project();
+  p.plan = demoPlan(p);
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: false };
+  p.production!.agentConfig = {
+    version: 1,
+    agents: [
+      {
+        id: 'custom_role',
+        name: '自定义岗位',
+        stages: ['storyboard'],
+        deliverable: '分镜',
+        checks: '检查',
+        enabled: true,
+      },
+    ],
+  };
+  assert.throws(
+    () =>
+      validateAutoDecision(
+        { action: 'revise_shots', roleId: 'custom_role', reason: '修订' },
+        p,
+      ),
+    /未授予/,
+  );
+  // Declaring the capability in the agent config grants the authority.
+  p.production!.agentConfig.agents[0].capabilities = ['revise_storyboard'];
+  assert.doesNotThrow(() =>
+    validateAutoDecision(
+      { action: 'revise_shots', roleId: 'custom_role', reason: '修订' },
+      p,
+    ),
+  );
+  assert.deepEqual(capabilitiesForRole('custom_role', p.production!.agentConfig.agents), [
+    'revise_storyboard',
+  ]);
+  // Known built-in roles keep their default grants even when configured without capabilities.
+  p.production!.agentConfig.agents.push({
+    id: 'writer',
+    name: '编剧',
+    stages: ['script'],
+    deliverable: '剧本',
+    checks: '检查',
+    enabled: true,
+  });
+  assert.ok(capabilitiesForRole('writer', p.production!.agentConfig.agents).includes('write_screenplay'));
 });
 
 void test('task records carry the derived capability and the verification task its own', async (t) => {

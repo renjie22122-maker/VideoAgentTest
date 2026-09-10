@@ -12,8 +12,8 @@ export type ArtifactKind = 'script' | 'asset' | 'shot' | 'prompt' | 'video' | 'q
 export type ArtifactRef = { id: string; kind: ArtifactKind };
 export type ArtifactNode = {
   ref: ArtifactRef;
-  /** current = usable; archived = superseded asset versions. */
-  status: 'current' | 'archived';
+  /** current = usable; stale = downstream of a recorded change; archived = superseded versions. */
+  status: 'current' | 'stale' | 'archived';
 };
 export type DependencyType =
   | 'depicts'
@@ -111,4 +111,21 @@ export function recordInvalidation(p: Project, changed: ArtifactRef[], affected:
   const events = (p.production!.artifactEvents ??= []);
   events.push({ at: Date.now(), changed, affected });
   if (events.length > 100) events.splice(0, events.length - 100);
+}
+
+/**
+ * Artifact manifest: every artifact with its lineage-derived status.
+ * Any artifact downstream of a recorded change is stale (current → stale);
+ * superseded asset versions stay archived. History is never deleted.
+ */
+export function artifactManifest(p: Project): ArtifactNode[] {
+  const graph = buildArtifactGraph(p);
+  const stale = new Set<string>();
+  for (const event of p.production?.artifactEvents ?? []) {
+    for (const ref of downstreamClosure(graph, event.changed)) stale.add(key(ref));
+  }
+  return graph.nodes.map((n) => ({
+    ref: n.ref,
+    status: n.status === 'archived' ? 'archived' : stale.has(key(n.ref)) ? 'stale' : 'current',
+  }));
 }

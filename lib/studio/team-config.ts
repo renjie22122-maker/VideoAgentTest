@@ -1,4 +1,6 @@
 import { filmTeam } from './team.ts';
+import { capabilityLabels } from './agent/capabilities.ts';
+import type { CapabilityId } from './agent/capabilities.ts';
 import type { Project, NodeId } from './types.ts';
 export type AgentDefinition = {
   id: string;
@@ -8,6 +10,12 @@ export type AgentDefinition = {
   checks: string;
   enabled: boolean;
   model?: string;
+  /**
+   * Explicit capability grants. Known built-in roles fall back to their
+   * default grants when absent; custom roles must declare capabilities here
+   * or the policy engine will refuse capability-required actions for them.
+   */
+  capabilities?: CapabilityId[];
 };
 export type AgentConfig = { version: 1; agents: AgentDefinition[] };
 export const defaultAgents = (): AgentDefinition[] =>
@@ -63,6 +71,19 @@ export function validateAgentConfig(value: unknown): AgentConfig {
       (typeof a.model !== 'string' || a.model.length > 120)
     )
       throw new Error('模型名称无效。');
+    let capabilities: CapabilityId[] | undefined;
+    if (a.capabilities !== undefined) {
+      if (
+        !Array.isArray(a.capabilities) ||
+        a.capabilities.length > 20 ||
+        a.capabilities.some(
+          (c) => typeof c !== 'string' || !(c in capabilityLabels),
+        ) ||
+        new Set(a.capabilities).size !== a.capabilities.length
+      )
+        throw new Error('岗位能力须为有效的唯一能力 ID（最多 20 个）。');
+      capabilities = [...a.capabilities] as CapabilityId[];
+    }
     return {
       id: a.id,
       name: a.name.trim(),
@@ -71,6 +92,7 @@ export function validateAgentConfig(value: unknown): AgentConfig {
       stages: [...new Set(a.stages)],
       enabled: a.enabled,
       ...(a.model?.trim() ? { model: a.model.trim() } : {}),
+      ...(capabilities ? { capabilities } : {}),
     };
   });
   if (!agents.some((a) => a.enabled)) throw new Error('至少启用一个岗位。');

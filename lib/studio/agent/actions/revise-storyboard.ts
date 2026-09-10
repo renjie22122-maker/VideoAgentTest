@@ -15,6 +15,10 @@ import type { AgentAction } from './types.ts';
  */
 export const reviseStoryboardAction: AgentAction = {
   id: 'revise_shots',
+  description: '修订完整分镜，保留已确认剧本、对白与场次时长；下游素材与批准随之失效。',
+  requiredCapabilities: ['revise_storyboard'],
+  effects: ['storyboard', 'prompts', 'media', 'approvals'],
+  requiresVerification: true,
   async execute(ctx) {
     const { project: p, run, decision, role, entry, contentBefore: before } = ctx;
     const result = await roleJSON(

@@ -24,11 +24,11 @@ export function buildObservation(p: Project, run: AutoRun) {
     roles,
     allowedActions: autoTaskContracts,
     // Capability dimension: roles stay the UI identity; the runtime routes by
-    // capability. Custom roles with unknown ids expose an empty list.
+    // capability. Declared grants win; known roles fall back to defaults.
     roleCapabilities: Object.fromEntries(
       roles.map((r) => [
         r.id,
-        capabilitiesForRole(r.id).map((c) => ({ id: c, label: capabilityLabels[c] })),
+        capabilitiesForRole(r.id, roles).map((c) => ({ id: c, label: capabilityLabels[c] })),
       ]),
     ),
     remaining: run.maxSteps - run.steps,

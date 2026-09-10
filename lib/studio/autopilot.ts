@@ -3,10 +3,11 @@ import { exhaustAutoRun } from './auto-run-state.ts';
 import type { Project } from './types.ts';
 import { buildObservation } from './agent/observation.ts';
 import { planDecision } from './agent/planner.ts';
-import type { AutoDecision } from './agent/planner.ts';
+import type { AutoDecision, PlanOutcome } from './agent/planner.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
 import { syncVerificationTask } from './agent/task.ts';
-import { getAgentAction, registeredAgentActions } from './agent/actions/registry.ts';
+import { getAgentAction, registeredAgentActions, describeAvailableActions } from './agent/actions/registry.ts';
+import { nextScheduledTask } from './agent/scheduler.ts';
 import { buildQualityReport } from './quality-report.ts';
 
 // Backward-compatible surface: run state primitives keep living here for callers
@@ -15,21 +16,27 @@ export { autoActions, createAutoRun, stopAutoRun, failAutoRun } from './auto-run
 export type { AutoRun } from './auto-run-state.ts';
 export type { AutoDecision } from './agent/planner.ts';
 export { validateAutoDecision, planDecision } from './agent/planner.ts';
+export { evaluateAutoDecision, assertAutoDecision } from './agent/policy.ts';
+export type { PolicyVerdict, PolicyViolation } from './agent/policy.ts';
 export { buildObservation, unresolvedFindings } from './agent/observation.ts';
-export { getAgentAction, registeredAgentActions, agentActions } from './agent/actions/registry.ts';
+export { getAgentAction, registeredAgentActions, agentActions, describeAvailableActions } from './agent/actions/registry.ts';
 export { beginStep, finishStep } from './agent/run-controller.ts';
 export { syncVerificationTask, openVerificationTask, taskKindForAction } from './agent/task.ts';
 export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from './agent/task.ts';
-export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels } from './agent/capabilities.ts';
-export type { CapabilityId } from './agent/capabilities.ts';
+export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities } from './agent/capabilities.ts';
+export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
+export { routeCapability, selectVerifier } from './agent/router.ts';
+export { nextScheduledTask, runnableTasks } from './agent/scheduler.ts';
 
 /**
  * One automatic collaboration step.
  *
- * The runtime is split into the four layers the planner depends on:
+ * The runtime is split into the layers the planner depends on:
  *
  *   buildObservation  ObservationBuilder  (deterministic context projection)
+ *   nextScheduledTask Task Scheduler      (pre-planned tasks first, via dependsOn)
  *   planDecision      Planner             (LLM proposes; runtime disposes)
+ *   policy            Policy Engine       (allow / deny, capability authority)
  *   getAgentAction    ActionRegistry      (whitelisted, bounded mutations)
  *   beginStep/finish  RunController       (audit log, repetition, budget)
  *
@@ -47,8 +54,23 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     delete run.pendingReview;
   // pendingReview is mirrored by an explicit verification task (AUTHOR != VERIFIER).
   syncVerificationTask(run, p);
-  const observation = buildObservation(p, run);
-  const plan = await planDecision(p, run, observation, assigned);
+  const baseObservation = buildObservation(p, run);
+  const observation = {
+    ...baseObservation,
+    // Data-driven action catalog: the planner sees capabilities/effects instead
+    // of more prose. The policy engine is the enforcement twin of this view.
+    availableActions: describeAvailableActions(baseObservation.roles, p),
+  };
+  // The agent loop serves tasks: scheduled work (dependsOn satisfied) runs
+  // before the LLM gets to propose anything new.
+  const scheduled = nextScheduledTask(run, observation.roles);
+  const plan: PlanOutcome = scheduled
+    ? {
+        kind: 'decision',
+        decision: scheduled.decision,
+        requiredReview: scheduled.decision,
+      }
+    : await planDecision(p, run, observation, assigned);
   if (plan.kind === 'pause') return;
   const { decision, requiredReview } = plan;
   const role = observation.roles.find((r) => r.id === decision.roleId);

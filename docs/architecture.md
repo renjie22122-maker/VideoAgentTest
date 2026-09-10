@@ -7,7 +7,7 @@
 | 创作状态 | types / screenplay / graph / story-context | 确认剧本、分镜、资产版本、跨幕资料和状态流转 |
 | 专业合同 | director / shot-intent / narrative / performance / sound-plan | 验证引用、对白原文、镜内时间、叙事线和声音来源 |
 | 质量诊断 | quality-report | 纯函数、稳定问题 ID、分级证据、岗位及修复建议；不调用模型 |
-| 协作控制 | autopilot / agent（planner、actions、run-controller、observation、task、capabilities）/ auto-run-state / auto-progress / team-runtime | 限定工具动作、候选与修改、去重、无进展停止、独立复核、任务与能力记录 |
+| 协作控制 | autopilot / agent（observation、scheduler、planner、policy、router、actions、run-controller、task、capabilities）/ auto-run-state / auto-progress / team-runtime | 限定工具动作、候选与修改、去重、无进展停止、独立复核、能力授权、任务调度与记录 |
 | 语言适配 | provider-catalog / language-provider | 供应商元数据、协议转换、错误分类；不修改作品 |
 | 媒体适配 | video-profile / video-text / minimax-video / fal-video / fal / openai-images | 能力预检、可见提示词、准备输入、提交和查询 |
 | 工作台事务 | server / commands / command-policy / timeouts | 锁、载入、守卫、有序命令注册表、审批、修订备份、队列、步骤幂等与等待策略 |
@@ -29,23 +29,26 @@
 7. 外部提交不支持凭空幂等。先完成本地准备，再持久化提交标记；未知提交不重发，已有远端 ID 只查询。
 8. 自动步骤携带 run ID 与 expectedStep。旧步骤只返回当前状态；网络失败后界面暂停，不因渲染再次提交。
 9. 密钥留在服务端。有效目标域名变化时检查预设回退，不能绕过跨域密钥保护。
-10. 每个自动步骤留下任务记录；分镜修订后的复核是显式 verify 任务，只能由另一岗位关闭，作者不能自验。
+10. 每个自动步骤留下任务记录；分镜修订后的复核是显式 verify 任务，由 Scheduler 按 dependsOn 调度、只能由另一岗位关闭，作者不能自验。
 11. 失效血缘只增不改、有界截断；旧产物以 stale / archived 表达，不物理删除历史。
+12. 能力是授权不是描述：岗位必须显式声明或内置默认授予动作所需能力，自定义岗位不因回退获得权限；被策略拒绝的决策不会触达任何模型调用。
 
 ## Agent Runtime 内核
 
-自动协作是一个四层运行时，`autopilot.ts` 只是门面：
+自动协作是一个分层运行时，`autopilot.ts` 只是门面：
 
 ```text
-buildObservation  ObservationBuilder  确定性上下文投影，只投影当前修订
-planDecision      Planner               LLM 提议，运行时裁决（含强制独立复核）
-getAgentAction    ActionRegistry       白名单动作执行器，每个动作是有界变更
-beginStep/finish  RunController        步骤记账、指纹去重、预算耗尽、失败标记
+buildObservation   ObservationBuilder  确定性上下文投影，含数据驱动 availableActions
+nextScheduledTask  Task Scheduler      dependsOn 满足的预规划任务先于 LLM 执行
+planDecision       Planner             LLM 提议，运行时裁决（含强制独立复核）
+policy             Policy Engine       允许/禁止/能力授权/失效的单一裁决点
+getAgentAction     ActionRegistry      白名单动作执行器，每个动作是有界变更
+beginStep/finish   RunController       步骤记账、指纹去重、预算耗尽、失败标记
 ```
 
-- 动作契约在 `agent/actions/types.ts`：mutation / invalidation / approval / verification 属于 action 实现，不是分散在调度开关里的规则。
-- `AgentTask`（agent/task.ts）记录每一步的岗位、能力、输入版本与结果；分镜修订把 `pendingReview` 镜像为 `verify_storyboard` 复核任务，只有另一岗位的独立复核能关闭它。任务记录只增不改，超限截断。
-- 能力模型（agent/capabilities.ts）把“岗位身份”与“能干什么”分开：决策仍输出 roleId 保持兼容，运行时按岗位授权派生 capability；自定义岗位回退到动作的规范能力，绝不因未知身份拒绝有效工作。
+- 动作契约在 `agent/actions/types.ts`：每个动作声明 `requiredCapabilities / effects / requiresVerification` 与描述；这些元数据以 `availableActions` 注入 Observation，是 policy 的数据孪生，也是未来瘦身 planner prompt 的基础。
+- `AgentTask`（agent/task.ts）记录每一步的岗位、能力、输入版本与结果；分镜修订把 `pendingReview` 镜像为 `verify_storyboard` 复核任务，Scheduler 按 `dependsOn` 判定就绪后强制安排独立复核（作者不能自验）。任务记录只增不改，超限截断。
+- 能力模型（agent/capabilities.ts）把“岗位身份”与“能干什么”分开：`capabilityForDecision` 只是描述性元数据，**授权是严格的一等行为**——Policy Engine 检查岗位的显式声明或内置默认授予，自定义岗位不声明能力就拒绝，绝不因回退获得权限（agent/policy.ts）。`AgentConfig` 已支持声明 `capabilities` 字段。
 - 规划器永远不直接拥有昂贵副作用：媒体生成、批准与队列仍在命令层，动作白名单只覆盖文字协作。
 
 ## 命令注册表
@@ -54,7 +57,7 @@ beginStep/finish  RunController        步骤记账、指纹去重、预算耗�
 
 ## 失效血缘与 Artifact 图
 
-生产 FSM（graph.ts）、任务图（agent/task.ts）与产物依赖图（artifact-graph.ts）是三个独立模型。`buildArtifactGraph` 从作品推导 script → shot → prompt → video → qa 与资产引用，`downstreamClosure` 给出变更的传递下游。`invalidateFrom` 与 `invalidateAssetMedia` 在原有清理之外追加 `production.artifactEvents` 血缘记录（只增、有界），回答“为什么这份素材被重新生成”。旧产物用 stale / archived 语义表达（资产 `retired`、任务 `cancelled`），不物理删除历史。
+生产 FSM（graph.ts）、任务图（agent/task.ts）与产物依赖图（artifact-graph.ts）是三个独立模型。`buildArtifactGraph` 从作品推导 script → shot → prompt → video → qa 与资产引用，`downstreamClosure` 给出变更的传递下游，`artifactManifest` 据此输出每个存续产物的 current / stale / archived 状态。`invalidateFrom` 与 `invalidateAssetMedia` 在原有清理之外追加 `production.artifactEvents` 血缘记录（只增、有界），回答“为什么这份素材被重新生成”。旧产物用 stale / archived 语义表达（资产 `retired`、任务 `cancelled`），不物理删除历史。
 
 ## 扩展语言服务
 

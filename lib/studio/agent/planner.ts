@@ -1,9 +1,10 @@
 import { roleJSON } from '../providers.ts';
-import { projectAgents } from '../team-config.ts';
 import { autoActions } from '../auto-run-state.ts';
 import type { AutoRun } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import type { AgentObservation } from './observation.ts';
+import { assertAutoDecision } from './policy.ts';
+import { selectVerifier } from './router.ts';
 
 export type AutoDecision = {
   roleId: string;
@@ -11,29 +12,12 @@ export type AutoDecision = {
   reason: string;
 };
 
+/** Compatibility wrapper: the policy engine is the single allow/deny authority. */
 export function validateAutoDecision(
   raw: Record<string, unknown>,
   p: Project,
 ): AutoDecision {
-  const roles = projectAgents(p).filter((r) => r.enabled);
-  if (
-    !autoActions.includes(raw.action as AutoDecision['action']) ||
-    typeof raw.reason !== 'string' ||
-    !raw.reason.trim() ||
-    raw.reason.length > 1500
-  )
-    throw new Error('总 Agent 返回了不允许的动作或无效理由。');
-  if (raw.action !== 'stop' && !roles.some((r) => r.id === raw.roleId))
-    throw new Error('总 Agent 选择了未启用岗位。');
-  if (raw.action === 'revise_shots' && !p.plan)
-    throw new Error('没有分镜可修改。');
-  if (raw.action === 'design_assets' && !p.production?.assets)
-    throw new Error('请先确认剧本并建立美术设定。');
-  return {
-    roleId: typeof raw.roleId === 'string' ? raw.roleId : 'producer',
-    action: raw.action as AutoDecision['action'],
-    reason: raw.reason,
-  };
+  return assertAutoDecision(raw, p);
 }
 
 export type PlanOutcome =
@@ -48,6 +32,8 @@ export type PlanOutcome =
  * The planner proposes, the runtime disposes. This resolves a next decision
  * (assigned, demo, or LLM supervisor) and — when a storyboard revision is
  * pending — forces an independent reviewer before any other work can proceed.
+ * Runs saved before the task model rely on this branch; newer runs have the
+ * verification task scheduled by agent/scheduler.ts.
  */
 export async function planDecision(
   p: Project,
@@ -58,17 +44,7 @@ export async function planDecision(
   const roles = observation.roles;
   let requiredReview: AutoDecision | undefined;
   if (run.pendingReview) {
-    const reviewer =
-      ['reviewer', 'continuity', 'director']
-        .map((id) =>
-          roles.find((r) => r.id === id && r.id !== run.pendingReview!.authorRoleId),
-        )
-        .find(Boolean) ??
-      roles.find(
-        (r) =>
-          r.id !== run.pendingReview!.authorRoleId &&
-          r.stages.some((s) => s === 'qa' || s === 'continuity'),
-      );
+    const reviewer = selectVerifier(roles, run.pendingReview.authorRoleId);
     if (!reviewer) {
       run.status = 'waiting_user';
       run.stopReason = 'review_required';

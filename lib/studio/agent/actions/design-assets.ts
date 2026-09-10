@@ -9,6 +9,10 @@ import type { AgentAction } from './types.ts';
  */
 export const designAssetsAction: AgentAction = {
   id: 'design_assets',
+  description: '新增未批准的文字设计候选；不合并、不删除、不选择版本、不生成图片。',
+  requiredCapabilities: ['design_art', 'design_character', 'design_environment', 'design_prop'],
+  effects: ['assetCandidates'],
+  requiresVerification: false,
   async execute(ctx) {
     const { project: p, run, decision, role, entry } = ctx;
     const assets = await planAssetLibrary(p, {
