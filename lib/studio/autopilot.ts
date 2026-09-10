@@ -1,3 +1,4 @@
+import { ASSET_POLICY_GUIDE,assetRequirementManifest } from './asset-policy.ts';
 import { skillGuide } from './skills.ts';
 import { DIRECTOR_SCHEMA } from './director.ts';
 import { WRITER_GUIDE, demoScreenplay } from './screenplay.ts';
@@ -65,6 +66,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   if (run.pendingReview && run.pendingReview.revision !== p.revision) delete run.pendingReview;
   const roles = projectAgents(p).filter(r => r.enabled);
   const context = {
+    assetPolicy: ASSET_POLICY_GUIDE, assetReadiness: assetRequirementManifest(p),
     instruction: run.instruction, storyContext: p.storyContext, stage: p.production!.node,
     roles, allowedActions: autoTaskContracts, remaining: run.maxSteps - run.steps,
     idea: p.idea, answers: p.answers, brief: p.brief, duration: p.duration,
@@ -79,6 +81,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     continuityReview: p.production?.continuityReview?.revision === p.revision ? p.production.continuityReview : undefined,
     pendingReview: run.pendingReview, history: run.log,
     qualityReport: buildQualityReport(p),
+    unresolvedTextFindings: unresolvedFindings(p),
   };
   let requiredReview: AutoDecision | undefined;
   if (run.pendingReview) {
@@ -95,7 +98,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   const raw = requiredReview ?? assigned ?? (p.mode === 'demo'
     ? { roleId: roles[0].id, action: run.steps ? 'stop' : 'review', reason: '演示自动调度，不修改真实内容。' }
     : await roleJSON('总 Agent 调度器',
-      '选择下一项最有价值的文本任务。返回 {roleId,action,reason}。遵循 allowedActions 中的交付物及批准规则。判断实际执行结果，不把建议、候选或尚待复核的修改当作完成。qualityReport 为本地确定性检查，error 必须解决或请求人工裁决，warning 是需判断的风险而不是强行改写理由；不可将缺失资料伪装已核验。review=部门会审；revise_shots=自动修正完整分镜；write_script=生成或修改剧本；design_assets=新增资产设计候选（不生图）；stop=停止并说明剩余事项。同一资产多个候选且只有一个 approved=true 是正常版本管理，不是重复批准或连续性错误。按 familyId 和 viewId 区分主图、候选、细节及服装套组；retired 资产不参与当前判断。design_assets 只能新增未批准设计候选，不能合并、删除或选择版本。优先解决有证据的问题，不反复做同一任务。禁止生成图片、视频、启动队列或变更用户批准。剧本修改和资产候选生成后必须等待人工确认。预算不足不是成功；修改分镜后系统将强制安排独立文本复核。',
+      '选择下一项最有价值的文本任务。返回 {roleId,action,reason}。遵循 allowedActions 中的交付物及批准规则。判断实际执行结果，不把建议、候选或尚待复核的修改当作完成。qualityReport 为本地确定性检查，error 必须解决或请求人工裁决，warning 是需判断的风险而不是强行改写理由；不可将缺失资料伪装已核验。review=部门会审；revise_shots=自动修正完整分镜；write_script=生成或修改剧本；design_assets=新增资产设计候选（不生图）；stop=停止并说明剩余事项。同一资产多个候选且只有一个 approved=true 是正常版本管理，不是重复批准或连续性错误。按 familyId 和 viewId 区分主图、候选、细节及服装套组；retired 资产不参与当前判断。design_assets 只能新增未批准设计候选，不能合并、删除或选择版本。优先解决有证据的问题，不反复做同一任务。禁止生成图片、视频、启动队列或变更用户批准。剧本修改后必须等待人工确认。新增不可或缺资产候选时提示人工补图；仅新增建议或可选资产时继续文字工作，不要求先确认所有图。遵循 assetPolicy 和 assetReadiness 的等级，不能因非必要参考图缺失而删除剧情。预算不足不是成功；unresolvedTextFindings 是当前尚待处理的文本意见，非空时不得声称无问题或已经通过，可继续修订或明确请求人工裁决；部门会审不会自动完成场记确认、提示词编译或用户批准，应按 stage 说明实际下一步。修改分镜后系统将强制安排独立文本复核。',
       context, { model: supervisor?.model }));
   const decision = validateAutoDecision(raw, p);
   const role = roles.find(r => r.id === decision.roleId);
@@ -116,6 +119,8 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     run.summary = remaining.length
       ? '总 Agent 停止了本轮协作，但当前版本仍有 ' + remaining.length + ' 项文本问题，需要进一步修订或人工裁决。'
       : p.mode === 'demo' ? '演示协作已结束，未进行真实模型质量评估。' : '总 Agent 已结束本轮文本协作；不代表图片或视频已经通过质量审查。';
+    entry.modelReason = decision.reason;
+    entry.message = run.summary + '【实际结果：已停止文本协作，未批准生成，未启动图片或视频任务。】';
     entry.outcome = 'stopped';
   } else if (decision.action === 'review') {
     const { report } = await runTeamReview(p, decision.roleId, { verification: run.pendingReview });
@@ -187,8 +192,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     } else {
       if (library.length + candidates.length > 160) throw new Error('资产候选数量达到上限。');
       p.production!.library = [...library, ...candidates];
-      run.status = 'waiting_user'; run.stopReason = 'asset_approval';
-      run.summary = '已新增 ' + candidates.length + ' 个未批准的文字设计候选。请在角色与场景中查看、生成或上传参考图并选择版本；原批准版本保留。';
+      run.summary = '已新增 ' + candidates.length + ' 个未批准的文字设计候选。请在角色与场景中查看、生成或上传参考图并选择版本；原批准版本保留。继续文字协作，候选可稍后选择；不可或缺主图仅在相关镜头生成前检查。';
       entry.outcome = 'candidate_created'; entry.artifactIds = candidates.map(a => a.id);
       entry.message += '【实际结果：仅新增未批准的文字设计候选，未合并资产、未改变原批准版本、未生成图片。】';
     }

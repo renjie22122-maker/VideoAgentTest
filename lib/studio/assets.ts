@@ -1,3 +1,4 @@
+import { usableAssets, requireReadyAssets } from './asset-policy.ts';
 import { ASSET_PROMPT_VERSION, compileAssetDesign } from './asset-design.ts';
 import { assetViews, isDesignBoard } from './asset-views.ts';
 import { randomUUID } from 'node:crypto';
@@ -21,19 +22,9 @@ export function rebuildAsset(p:Project,id:unknown):Asset{
  const candidate=assetInventory(p).find(a=>a.kind===source.kind&&a.name===source.name);if(!candidate)throw new Error('该资产需从最新设定重新建立清单。');
  return {...candidate,parentId:source.parentId??source.id,version:Math.max(...library.filter(a=>a.id===(source.parentId??source.id)||a.parentId===(source.parentId??source.id)).map(a=>a.version))+1};
 }
-export function approvedAssets(p:Project,shotId?:string){
- const library=p.production?.library??[],scene=p.production?.script?.scenes?.find(scene=>scene.id===p.plan?.shots.find(s=>s.id===shotId)?.scene);
- return library.filter(a=>{if(a.viewId||a.retired||!a.approved||a.status!=='ready'||!a.url)return false;const root=library.find(v=>v.id===(a.parentId??a.id))??a;
- const identity=library.find(v=>v.id===(root.costumeOf??root.id))??root;
- const selected=p.production?.costumeSelections?.[identity.id];
- if(root.costumeOf&&selected!==root.id)return false;if(!root.costumeOf&&selected&&selected!==root.id)return false;
- if(!scene)return true;
- if(root.kind==='background')return root.name===scene.location||root.evidence===scene.location;
- if(root.kind==='character')return (p.production?.script?.characters??[]).some(c=>c.name===identity.name&&scene.characters.includes(c.id));return true;});
-}
+export function approvedAssets(p:Project,shotId?:string){return usableAssets(p,shotId);}
 export function assetReferences(p:Project,shotId?:string){return approvedAssets(p,shotId).map(a=>a.url!);}
-export function requireAssetMasters(p:Project){const assets=approvedAssets(p);for(const a of p.production?.library??[])if(!a.costumeOf&&!a.retired&&['character','background','prop'].includes(a.kind)&&!assets.some(v=>{const root=p.production!.library!.find(r=>r.id===(v.parentId??v.id))??v;const identity=p.production!.library!.find(r=>r.id===(root.costumeOf??root.id))??root;return identity.name===a.name&&identity.kind===a.kind;}))throw new Error('请先确认人物、场景与道具主图：'+a.name);for(const a of assets){const views=(p.production?.library??[]).filter(v=>!v.retired&&v.sourceAssetId===a.id&&v.viewId);if(views.length&&(!a.setReview||views.some(v=>!v.approved||!a.setReview!.viewIds.includes(v.id))))throw new Error('请先完成整套设定图审核：'+a.name);}
- if(!assets.length)throw new Error('请先在角色与场景中建立资产库、生成并确认参考图。');}
+export function requireAssetMasters(p:Project,shotId?:string){requireReadyAssets(p,shotId?[shotId]:undefined);}
 export function variant(p:Project,id:unknown,notes:unknown,ids:unknown){
  const parent=p.production!.library!.find(a=>a.id===id);if(!parent?.approved||!parent.url)throw new Error('请先确认原始资产图。');
  if(!Array.isArray(ids)||ids.length>9||ids.some(v=>typeof v!=='string'))throw new Error('参考资产选择无效。');
@@ -78,12 +69,9 @@ export function reviewAssetSet(p:Project,id:unknown,notes:unknown){
  source.setReview={at:Date.now(),notes:text(notes,'一致性审核意见',1500),viewIds:views.map(a=>a.id)};
 }
 
-export function requireAssetSets(p:Project){
- requireAssetMasters(p);
- for(const source of approvedAssets(p)){if(!source.setReview)throw new Error('请完成整套设定图并审核：'+source.name);}
-}
+export function requireAssetSets(p:Project,shotId?:string){requireAssetMasters(p,shotId); }
 export function selectCostume(p:Project,id:unknown){
  const source=p.production?.library?.find(a=>a.id===id),root=p.production?.library?.find(a=>a.id===(source?.parentId??source?.id));
- if(!source?.approved||!source.setReview||root?.kind!=='character')throw new Error('请先完成此套服装的设定图审核。');
+ if(!source?.approved||source.status!=='ready'||!source.url||root?.kind!=='character')throw new Error('请先确认此套服装的主图。');
  (p.production!.costumeSelections??={})[root.costumeOf??root.id]=root.id;
 }

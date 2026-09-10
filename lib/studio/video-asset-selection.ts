@@ -1,3 +1,4 @@
+import {assetRequirement,assetAppliesToShot} from './asset-policy.ts';
 import type {Project} from './types.ts';
 // Browser-safe selection; generated and uploaded approved assets are treated equally.
 export function videoAssetChoices(p:Project){
@@ -22,9 +23,11 @@ export function suggestVideoAssets(p:Project,shotId:string){
   const explicit=text.includes(name)||text.includes(a.name);
   const sceneMatch=root.kind==='background'&&(scene?.location===root.name||scene?.location===root.evidence);
   // Dialogue-only speakers are not assumed visible. Match visual state, not dialogue.
-  if(!explicit&&!sceneMatch)return [];
-  const priority=root.kind==='character'?0:root.kind==='background'?1:2;
-  return [{id:a.id,name:a.name,url:a.url!,reason:explicit?'镜头画面 / 场记中提及':'匹配本场环境',priority}];
+  const scoped=root.sceneIds!==undefined&&assetAppliesToShot(p,root,shot);
+  if(root.sceneIds!==undefined&&!scoped&&!shot.videoInput?.assetIds?.includes(a.id))return [];
+  if(!explicit&&!sceneMatch&&!scoped)return [];
+  const priority=(assetRequirement(root)==='required'?0:10)+(root.kind==='character'?0:root.kind==='background'?1:2);
+  return [{id:a.id,name:a.name,url:a.url!,reason:explicit?'镜头画面 / 场记中提及':scoped?'用户 / 美术指定本场使用':'匹配本场环境',priority}];
  }).sort((a,b)=>a.priority-b.priority);
  const seen=new Set<string>();const unique=matches.filter(a=>{if(seen.has(a.url))return false;seen.add(a.url);return true;});
  return {ids:unique.slice(0,9).map(a=>a.id),matches:unique.slice(0,9),omitted:unique.slice(9).map(a=>a.name)};

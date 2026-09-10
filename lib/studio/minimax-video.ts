@@ -1,3 +1,4 @@
+import {assetFallbackDesigns} from './asset-policy.ts';
 import {miniMaxTiming,timingInstruction} from './render-timing.ts';
 import {soundTimeline} from './sound-plan.ts';
 import { PHYSICS_GUIDE } from './physical-rules.ts';
@@ -26,7 +27,7 @@ export function prepareMiniMax(p:Project,j:Job,model:string){
   for(const id of ids){const a=assets.find(a=>a.id===id);if(!a?.url)throw new Error('所选美术参考图已失效，请重新选择。');images.push({url:a.url,role:'reference_image',name:a.name});}
  }
  let cursor=0;const timeline=j.group?.shots.map(s=>{const start=cursor;cursor+=s.duration;return {叙事线:s.narrative,台词表演:s.performance,设计:s.intent,镜头:s.id,开始秒:start,结束秒:cursor,画面:s.description,景别:s.size,运镜:s.camera,对白:s.dialogue,声音:s.sound,起始状态:s.startState,结束状态:s.endState,转场:s.transition};});
- const prompt=JSON.stringify({时长适配:timingInstruction(timing),声音时间表:soundTimeline(j.group?.shots??[shot]),叙事线:shot.narrative,台词表演:shot.performance,默认物理约束:PHYSICS_GUIDE,相机速度参考:cameraSpeedSummary(shot),本镜视听设计:shot.intent,故事约束:p.storyContext?.guide,分镜时间表:timeline,模式:mode,参考顺序:images.map((a,i)=>({编号:i+1,名称:a.name})),运动程序:motionGuidance(shot),画面:shot.description,运镜:shot.camera,开始:shot.startState,结束:shot.endState,对白:shot.dialogue,声音:shot.sound,要求:j.group?'按分镜时间表依次生成多个镜头组成的一段视频，在指定时间切镜，保留各镜对白、机位和动作；依据参考图保持身份，不复制设定板排版。':mode==='references'?'依据美术参考图保持人物身份、服装和场景；设定板只取基准造型，不复制多面板排版。单一连续镜头。':mode==='text'?'根据文字生成单一连续镜头。':'遵守输入首尾关键帧，单一连续镜头，不复制设定板布局。'});
+ const prompt=JSON.stringify({未附图资产的文字设定:assetFallbackDesigns(p,j.group?.shots.map(s=>s.id)??[shot.id]),时长适配:timingInstruction(timing),声音时间表:soundTimeline(j.group?.shots??[shot]),叙事线:shot.narrative,台词表演:shot.performance,默认物理约束:PHYSICS_GUIDE,相机速度参考:cameraSpeedSummary(shot),本镜视听设计:shot.intent,故事约束:p.storyContext?.guide,分镜时间表:timeline,模式:mode,参考顺序:images.map((a,i)=>({编号:i+1,名称:a.name})),运动程序:motionGuidance(shot),画面:shot.description,运镜:shot.camera,开始:shot.startState,结束:shot.endState,对白:shot.dialogue,声音:shot.sound,要求:j.group?'按分镜时间表依次生成多个镜头组成的一段视频，在指定时间切镜，保留各镜对白、机位和动作；依据参考图保持身份，不复制设定板排版。':mode==='references'?'依据美术参考图保持人物身份、服装和场景；设定板只取基准造型，不复制多面板排版。单一连续镜头。':mode==='text'?'根据文字生成单一连续镜头。':'遵守输入首尾关键帧，单一连续镜头，不复制设定板布局。'});
  if(prompt.length>7000)throw new Error('视频提示词超过 H3 的 7000 字限制，请精简镜头描述。');
  return {prompt,images,shot,mode,timing};
 }

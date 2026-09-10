@@ -203,15 +203,15 @@ void test('automatic steps are transactional, honor model routing, and require s
   assert.equal(models.length, 6);
 });
 
-void test('asset candidates wait for selection and repeated identical designs do not accumulate', async () => {
+void test('asset candidates allow text collaboration while images remain unapproved; identical designs do not accumulate', async () => {
   const p = project(); p.plan = demoPlan(p);
   p.production!.script = demoScreenplay(p);
   p.production!.assets = { bible: p.plan.bible, seed: 42, locked: false };
   start(p);
   const decision = { roleId: 'character_art', action: 'design_assets' as const, reason: '形成候选' };
   await autoStep(p, decision);
-  assert.equal(p.production!.autoRun!.status, 'waiting_user');
-  assert.equal(p.production!.autoRun!.stopReason, 'asset_approval');
+  assert.equal(p.production!.autoRun!.status, 'running');
+  assert.equal(p.production!.autoRun!.stopReason, undefined);
   const count = p.production!.library!.length;
   assert.ok(count > 0);
   assert.ok(p.production!.library!.every(a => !a.approved && a.status === 'draft' && !a.url));
@@ -315,4 +315,40 @@ void test('pending reviews survive absent reviewer roles and demo reports cannot
   assert.equal(p.production!.autoRun!.status, 'waiting_user');
   assert.equal(p.production!.autoRun!.stopReason, 'review_required');
   assert.deepEqual(p.production!.autoRun!.pendingReview, pending);
+});
+
+void test('supervisor receives outstanding text findings and cannot claim approval in its stop log', async t => {
+  const p = project(); start(p);
+  await autoStep(p, { roleId: 'reviewer', action: 'review', reason: '建立测试报告' });
+  const report = p.production!.teamReports![0];
+  report.findings = [{ shotId: 'shot-15', severity: 'warning', evidence: '刀已离手却再次甩刀', suggestion: '统一起始状态和动作', returnTo: 'storyboard' }];
+  const stale = structuredClone(report); stale.revision = 0;
+  p.production!.teamReports!.push(stale);
+  p.production!.continuityReview = { revision: p.revision, summary: '仍需复核', findings: [{ shotId: 'shot-12', evidence: '未覆盖已确认动作', message: '动作缺失', suggestion: '恢复动作或请用户裁决' }] };
+  const old = { STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR, LLM_BASE_URL: process.env.LLM_BASE_URL, LLM_API_KEY: process.env.LLM_API_KEY, LLM_MODEL: process.env.LLM_MODEL };
+  Object.assign(process.env, { STUDIO_DATA_DIR: await mkdtemp(path.join(tmpdir(), 'auto-stop-')), LLM_BASE_URL: 'https://auto-stop.invalid/v1', LLM_API_KEY: 'test', LLM_MODEL: 'test' });
+  t.after(() => { for (const [key, value] of Object.entries(old)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  p.mode = 'live'; start(p);
+  const claim = '已通过文本会审，无任何问题，只需批准生成';
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    calls++;
+    assert.match(String(url), /auto-stop.invalid\/v1\/chat\/completions$/);
+    const request = JSON.parse(init.body as string);
+    const context = JSON.parse(request.messages[1].content);
+    assert.equal(context.unresolvedTextFindings.length, 2);
+    assert.deepEqual(context.unresolvedTextFindings.map((f: {shotId: string}) => f.shotId), ['shot-15', 'shot-12']);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ roleId: 'producer', action: 'stop', reason: claim }) } }] }));
+  });
+  await autoStep(p);
+  assert.equal(calls, 1);
+  const run = p.production!.autoRun!;
+  assert.equal(run.status, 'waiting_user');
+  assert.equal(run.stopReason, 'unresolved_findings');
+  assert.match(run.log[0].message, /仍有 2 项文本问题/);
+  assert.match(run.log[0].message, /未批准生成/);
+  assert.equal(run.log[0].message.includes(claim), false);
+  assert.equal(run.log[0].modelReason, claim);
+  assert.equal(p.production!.renderApprovedRevision, undefined);
+  assert.deepEqual(p.jobs, []);
 });

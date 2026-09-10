@@ -11,7 +11,10 @@
 | 语言适配 | provider-catalog / language-provider | 供应商元数据、协议转换、错误分类；不修改作品 |
 | 媒体适配 | video-profile / video-text / minimax-video / fal-video / fal / openai-images | 能力预检、可见提示词、准备输入、提交和查询 |
 | 工作台事务 | server / command-policy / timeouts | 本地读写、审批、修订备份、队列、步骤幂等与等待策略 |
-| 界面 | production-diagnostics / auto-run-driver / auto-pilot / video-preflight | 明确下一步、生成前检查与可选择的进阶信息 |
+| 资产依赖 | asset-policy / asset-catalog | 实体与候选、等级、场次匹配、增量补充与定向媒体失效 |
+| 界面 | production-diagnostics / auto-run-driver / auto-pilot / production-handoff / video-preflight | 只读回看、意见输入、协作推进、交接与批准 |
+| 结果等待 | media-poll-driver / media-poll-state | 跨页面串行推进已授权队列并查询已有资产任务 |
+| 完成提醒 | notification-events / notification-client / notification-center | 状态差分、通知分类、去重、权限与结果定位 |
 
 专业规范位于 `production-skills/`，是产品运行时规范，不是 Codex 插件。修改规范需要同步 `skills.ts` 版本。新增知识不应只增加提示词长度：优先定义可检查输入、输出及真实失败样例。
 
@@ -33,7 +36,7 @@
 
 ## 扩展视频服务
 
-先定义 video-profile 的实际模式、时长、参考数量及声音能力，再实现纯准备函数、提交与查询。videoPreview 必须与真实提交共享准备函数。新 endpoint 没有 adapter 时不能宣称兼容；不要通过截断对白或自动改时长来适配供应商。
+先定义 video-profile 的实际模式、时长、参考数量及声音能力，再实现纯准备函数、提交与查询。videoPreview 必须与真实提交共享准备函数。新 endpoint 没有 adapter 时不能宣称兼容；不要通过截断对白或改写创作时长来适配供应商。render-timing 可将请求时长向上取整并保留原剪辑时长；超过单次上限的单镜由 long-take 串行接续并本地组装，预检、提交和恢复共用这些规则。
 
 提交前回调仅在本地校验完成后运行。回调持久化失败时不得发送 HTTP；网络结果未知则保留标记。不能把“超时”当作“供应商没有收费”。
 
@@ -47,3 +50,19 @@
 ## 已知工程边界
 
 当前仍是本地单进程文件存储与页面推进。没有持久后台 Worker、数据库事务、多用户权限和自动分轨音频合成。扩展这些能力应通过明确迁移与兼容测试完成，而不是把更多副作用放入一个 Agent 的提示词。
+
+## 资产就绪与状态失效
+
+asset-policy 按实体与当前服装选择查询就绪状态。同一实体的原始记录保存身份、等级和场次范围，批准变体提供实际参考图；退休原始记录仍可作为活跃变体的身份元数据。跨幕清除旧场次编号范围，再按新剧本匹配。
+
+asset-catalog 负责来源校验、增量去重和媒体依赖失效。新文字候选不覆盖原批准图，不等待出图即可继续文本协作。必备主图仅在关联镜头提交媒体前检查；推荐和可选资产缺图时把文字设计传给媒体适配器，但不绕过供应商最少输入要求。
+
+确认替代图会失效关联镜头、共享联合片段及接续依赖，保留用户上传首帧与无关任务；不增加创作 revision。旧任务以 assetSuperseded 标记，保留历史输出、排除旧恢复入口和旧版本重试预算。关联远端任务结果未收回或提交未知时，禁止用替换参考图绕过查询与重复计费保护。
+
+## 页面等待与结果通知
+
+MediaPollDriver 常驻 Home，串行交替处理已有图片资产任务和已授权生成队列；不会因打开另一工作台页面而卸载。AutoRunDriver 独立推进白名单文字协作。媒体回写只更新保存状态，不用完整 sync 覆盖用户编辑中的草稿。
+
+studioRequest 的成功与异常出口连接 notification-client；纯 notification-events 比较已保存状态。排队、提交、上传、取消均不是生成完成。真实素材需成功状态和输出地址，长镜头还需最终组装完成；自动协作以实际状态与步骤为准，不以 HTTP 200 推断成功。
+
+页面提醒按标签页去重；桌面提醒用共享记录与 Web Locks 去重，记录仅保存压缩事件标识与时间。首次读取项目建立基线，不批量重发历史结果。通知许可失败、用户关闭提醒和通知构造异常均不改变请求结果。权限由用户点击开启，关闭标签页后没有后台推送服务。

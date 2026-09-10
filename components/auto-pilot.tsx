@@ -1,15 +1,22 @@
 'use client';
 import { useState } from 'react';
-import type { Project } from '@/lib/studio/types';
+import { ProductionHandoff } from './production-handoff';
+import type { NodeId, Project } from '@/lib/studio/types';
 import { Button } from './ui/button';
 export function AutoPilot({
   project,
   busy,
   act,
+  onOpenStage,
 }: {
   project: Project;
   busy: boolean;
-  act: (action: string, data?: Record<string, unknown>) => Promise<unknown>;
+  act: (
+    action: string,
+    data?: Record<string, unknown>,
+    navigate?: boolean,
+  ) => Promise<unknown>;
+  onOpenStage: (stage: NodeId) => void;
 }) {
   const [notes, setNotes] = useState(
     '检查当前制作方案，自动修正有证据的文本问题，不改变创意、已确认对白和时长。',
@@ -76,9 +83,24 @@ export function AutoPilot({
           </p>
           {run.summary && <output>{run.summary}</output>}
           {run.error && <p role="alert">{run.error}</p>}
+          {run.status !== 'running' && (
+            <ProductionHandoff
+              key={project.id + ':' + project.revision}
+              project={project}
+              maxSteps={maxSteps}
+              busy={busy}
+              act={act}
+              onOpenStage={onOpenStage}
+            />
+          )}
           {run.log.map((entry, i) => (
             <p key={i}>
-              {i + 1}. {entry.role} · {entry.action}：{entry.message}
+              {i + 1}. {entry.role} · {entry.action}：
+              {entry.action === 'stop' &&
+              i === run.log.length - 1 &&
+              run.summary
+                ? run.summary
+                : entry.message}
             </p>
           ))}
         </>

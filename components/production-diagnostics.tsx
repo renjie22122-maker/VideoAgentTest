@@ -5,6 +5,7 @@ import type { QualityStrictness } from '@/lib/studio/quality-report';
 import type { Project } from '@/lib/studio/types';
 import { filmTeam } from '@/lib/studio/team';
 import { Button } from './ui/button';
+import { WorkspaceLink } from './ui/workspace-link';
 export function ProductionDiagnostics({
   project,
   busy,
@@ -115,9 +116,9 @@ export function ProductionDiagnostics({
             <p>依据：{f.evidence}</p>
             <p>建议：{f.suggestion}</p>
             {f.shotIds.map((id) => (
-              <Button key={id} variant="ghost" onClick={() => onShot(id)}>
+              <WorkspaceLink key={id} href={'#'+id} onNavigate={() => onShot(id)}>
                 查看 {id}
-              </Button>
+              </WorkspaceLink>
             ))}
           </details>
         ))

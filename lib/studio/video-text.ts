@@ -1,7 +1,9 @@
+import {assetFallbackDesigns} from './asset-policy.ts';
 import type { Project, Shot } from './types.ts';
 import { motionGuidance } from './motion.ts';
 export function videoText(p: Project, s: Shot): string {
   return JSON.stringify({
+    未附图资产的文字设定: assetFallbackDesigns(p,[s.id]),
     画面: s.description,
     镜头目的: s.intent?.purpose,
     视听: s.intent?.visualPlan,

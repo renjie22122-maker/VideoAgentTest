@@ -2,23 +2,35 @@
 import { AutoPilot } from './auto-pilot';
 import { projectAgents } from '@/lib/studio/team-config';
 import { AgentCustomization } from './agent-customization';
-import type { Project } from '@/lib/studio/types';
+import type { NodeId, Project } from '@/lib/studio/types';
 import { Button } from './ui/button';
 export function AgentTeam({
   project,
   busy,
   act,
+  onOpenStage,
 }: {
   project: Project;
   busy: boolean;
-  act: (action: string, data?: Record<string, unknown>) => Promise<unknown>;
+  act: (
+    action: string,
+    data?: Record<string, unknown>,
+    navigate?: boolean,
+  ) => Promise<unknown>;
+  onOpenStage: (stage: NodeId) => void;
 }) {
   const filmTeam = projectAgents(project),
     stage = project.production?.node ?? 'clarify',
     recommended = filmTeam.filter((r) => r.enabled && r.stages.includes(stage));
   return (
     <section className="panel">
-      <h2>制作团队 · 总 Agent 协调</h2><AutoPilot project={project} busy={busy} act={act}/>
+      <h2>制作团队 · 总 Agent 协调</h2>
+      <AutoPilot
+        project={project}
+        busy={busy}
+        act={act}
+        onOpenStage={onOpenStage}
+      />
       <AgentCustomization
         key={project.id + ':' + (project.production?.agentConfigRevision ?? 0)}
         project={project}

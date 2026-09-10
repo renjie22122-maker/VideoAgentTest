@@ -1,3 +1,5 @@
+import {appendNewAssets,createUserAsset,updateAssetRequirement,invalidateAssetMedia} from './asset-catalog.ts';
+import {requireReadyAssets,assetRequirement} from './asset-policy.ts';
 import {tickLongTake} from './take-runner.ts';
 import {serveTakeVideo,requireFFmpeg} from './take-media.ts';
 import {validateBriefDecisions,inheritBriefDecisions} from './brief-decisions.ts';
@@ -19,7 +21,7 @@ import { runTeamReview } from './team-runtime.ts';
 import { validateAgentConfig } from './team-config.ts';
 import { saveAssetUpload } from './asset-upload.ts';
 import { validateAssetDesigns } from './asset-design.ts';
-import { createAssetViews, createCostumeSet, createPropState, reviewAssetSet, requireAssetSets, selectCostume, rebuildAsset, variant, startAsset, updateAsset } from './assets.ts';
+import { createAssetViews, createCostumeSet, createPropState, reviewAssetSet, selectCostume, rebuildAsset, variant, startAsset, updateAsset } from './assets.ts';
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -37,7 +39,7 @@ import { readImage } from './openai-images.ts';
 const root=path.resolve(process.env.STUDIO_DATA_DIR||'.studio');
 const file=path.join(root,'projects.json');
 let mutating=false;
-type Command={decisions?:unknown;expectedRunId?:string;expectedStep?:number;findingIds?:string[];maxSteps?:number;storyGuide?:unknown;neighborId?:string;videoInput?:Shot['videoInput'];regenerate?:boolean;agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
+type Command={asset?:unknown;decisions?:unknown;expectedRunId?:string;expectedStep?:number;findingIds?:string[];maxSteps?:number;storyGuide?:unknown;neighborId?:string;videoInput?:Shot['videoInput'];regenerate?:boolean;agentConfig?:unknown;roleId?:string;action?:string;id?:string;revision?:number;idea?:unknown;duration?:unknown;ratio?:Project['ratio'];mode?:Project['mode'];answers?:Record<string,unknown>;script?:Record<string,unknown>;seed?:unknown;bible?:unknown;shot?:Shot;kind?:'image'|'video';verdict?:'passed'|'rejected';shotId?:string;notes?:unknown;settings?:unknown;assetId?:unknown;referenceIds?:unknown;imageBase64?:unknown;filename?:unknown};
 async function load():Promise<Project[]> {try{return JSON.parse(await readFile(file,'utf8'));}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return [];throw new Error('项目存储无法读取，请检查 .studio/projects.json。');}}
 async function save(data:Project[]){await mkdir(root,{recursive:true});const tmp=file+'.tmp';await writeFile(tmp,JSON.stringify(data,null,2),'utf8');await rename(tmp,file);}
 function bump(p:Project){p.updatedAt=Date.now();}
@@ -90,7 +92,7 @@ async function handle(input:Command):Promise<unknown>{
     const idea=text(input.idea,'下一幕创意',4000),timing=resolveDuration(input.duration,{idea,answers:{}});
     const next:Project={id:randomUUID(),revision:1,title:'第 '+((p.storyContext?.actNumber??1)+1)+' 幕 · '+idea.slice(0,18),idea,duration:timing.seconds,durationMode:timing.mode,durationReason:timing.reason,ratio:p.ratio,mode:p.mode,createdAt:Date.now(),updatedAt:Date.now(),phase:'clarify',answers:{},questions:[],jobs:[],storyContext:nextStoryContext(p),production:initialProduction()};
     next.production!.agentConfig=structuredClone(p.production.agentConfig);next.production!.costumeSelections=structuredClone(p.production.costumeSelections);
-    next.production!.library=structuredClone(p.production.library??[]).map(a=>({...a,retired:a.retired||!a.approved}));
+    next.production!.library=structuredClone(p.production.library??[]).map(a=>({...a,sceneIds:undefined,retired:a.retired||!a.approved}));
     all.push(next);await save(all);return next;
   }
   if(input.action==='enqueue_group'){
@@ -167,10 +169,12 @@ async function handle(input:Command):Promise<unknown>{
     const g=p.production!;if(!g)throw new Error('作品未初始化。');
     if(input.action==='auto_stop'){if(g.autoRun)stopAutoRun(g.autoRun);}
     else{
-      if(p.jobs.some(j=>['running','queued'].includes(j.status))||g.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止媒体生成。');
+      if(p.jobs.some(j=>['running','queued'].includes(j.status))||g.library?.some(a=>a.status==='running'&&assetRequirement(a,g.library)==='required'))throw new Error('请先完成或停止媒体生成。');
       if(input.action==='auto_start'){
         if(g.autoRun?.status==='running')throw new Error('自动任务已经运行。');
-        g.autoRun=createAutoRun(p,text(input.notes,'自动任务要求',2000),input.maxSteps??4);
+        const nextRun=createAutoRun(p,text(input.notes,'自动任务要求',2000),input.maxSteps??4);
+        if(g.autoRun){const backupDir=path.join(root,'auto-backups');await mkdir(backupDir,{recursive:true});await writeFile(path.join(backupDir,p.id+'-restart-'+Date.now()+'.json'),JSON.stringify(p,null,2));}
+        g.autoRun=nextRun;
       }else{
         const assigned=input.action==='continuity_fix'?continuityFixDecision(p):input.action==='quality_fix'?qualityFixDecision(p,input.findingIds):undefined;
         if(!assigned&&g.autoRun?.status!=='running')throw new Error('自动任务未启动。');
@@ -193,10 +197,17 @@ async function handle(input:Command):Promise<unknown>{
   }
   if(input.action?.startsWith('asset_')){
     if(!p.production?.assets)throw new Error('请先确认剧本与美术设定。');
-    if(p.jobs.some(j=>j.status==='running'||j.status==='queued'))throw new Error('请先完成或停止分镜生成队列。');
+    const appendOnly=['asset_add','asset_supplement','asset_requirement','asset_poll','asset_abandon'].includes(input.action);
+    if(!appendOnly&&p.jobs.some(j=>j.status==='running'||j.status==='queued'))throw new Error('请先完成或停止分镜生成队列。');
     const library=p.production.library??=[];
-    if(library.some(a=>a.status==='running')&&!['asset_poll','asset_abandon'].includes(input.action))throw new Error('请先完成或停止正在生成的资产。');
-    if(input.action==='asset_save_bible'){
+    if(!appendOnly&&library.some(a=>a.status==='running')&&!['asset_poll','asset_abandon'].includes(input.action))throw new Error('请先完成或停止正在生成的资产。');
+    if(input.action==='asset_add'){
+      appendNewAssets(p,[createUserAsset(p,input.asset)]);
+      p.production.events.push({at:Date.now(),node:p.production.node,role:'用户',message:'快速补充文字资产，已保留原分镜、参考图和批准状态。'});
+    }else if(input.action==='asset_supplement'){
+      const additions=await planAssetLibrary(p,{supplement:true});const fresh=appendNewAssets(p,additions);
+      p.production.events.push({at:Date.now(),node:p.production.node,role:'美术',message:'按最新剧本与分镜补充 '+fresh.length+' 项新资产候选，旧版本保留；未生成图片。'});
+    }else if(input.action==='asset_save_bible'){
       const bible=validateBible(input.bible);
       const additions=await planAssetLibrary({...p,production:{...p.production,assets:{...p.production.assets,bible}}});
       if(library.length+additions.length>160)throw new Error('资产版本已达到 160 个上限，请新建作品。');
@@ -211,7 +222,8 @@ async function handle(input:Command):Promise<unknown>{
       }
     }else{
       const asset=library.find(a=>a.id===input.assetId);if(!asset)throw new Error('资产不存在。');if(asset.retired)throw new Error('这是旧设定下的归档资产，请使用新候选。');
-      if(input.action==='asset_upload'){
+      if(input.action==='asset_requirement'){updateAssetRequirement(p,asset,input.asset);
+      }else if(input.action==='asset_upload'){
         if(asset.status!=='draft')throw new Error('请先创建新候选，再上传替换图，原图会保留。');
         const upload=await saveAssetUpload(input.imageBase64);asset.url=upload.url;asset.status='ready';asset.approved=false;asset.origin='upload';asset.uploadedFilename=typeof input.filename==='string'?input.filename.replace(/[\\/]/g,'_').slice(0,150):'本地图片';asset.model='本地上传';asset.error=undefined;
       }else if(input.action==='asset_regenerate'){
@@ -231,10 +243,11 @@ async function handle(input:Command):Promise<unknown>{
         if(asset.status==='running')try{await updateAsset(asset);}catch(e){asset.error=e instanceof Error?e.message:'资产跟踪失败';if(!asset.remoteId)asset.status='failed';}
       }else if(input.action==='asset_approve'){
         if(asset.status!=='ready'||(p.mode==='live'&&(!asset.url||asset.promptVersion!=='3.0.0')))throw new Error('请等待图片生成完成再确认。');
+        const backupDir=path.join(path.dirname(file),'auto-backups');await mkdir(backupDir,{recursive:true});await writeFile(path.join(backupDir,p.id+'-asset-'+Date.now()+'.json'),JSON.stringify(p,null,2));
         if(asset.sourceAssetId){const source=library.find(a=>a.id===asset.sourceAssetId);if(source)source.setReview=undefined;}
         const root=asset.parentId??asset.id;for(const a of library)if((a.id===root||a.parentId===root)&&(a.viewId??'master')===(asset.viewId??'master'))a.approved=false;
         if(!asset.viewId)for(const a of library)if(a.viewId&&a.parentId===root&&a.sourceAssetId!==asset.id){a.approved=false;a.retired=true;}
-        asset.approved=true;asset.setReview=undefined;if(p.plan){invalidateFrom(p,0);reopenStoryboard(p);}else p.revision++;
+        asset.approved=true;asset.setReview=undefined;if(p.plan)invalidateAssetMedia(p,asset);else p.revision++;
       }else if(input.action==='asset_abandon'){
         if(asset.status!=='running')throw new Error('该资产未在生成中。');asset.status='failed';asset.error='已停止本地跟踪，供应商任务可能仍在执行并计费。';
       }else if(input.action==='asset_retry'){
@@ -242,17 +255,18 @@ async function handle(input:Command):Promise<unknown>{
         if(asset.remoteId){asset.status='running';asset.error=undefined;}else library.push({...asset,id:randomUUID(),version:asset.version+1,status:'draft',error:undefined,createdAt:Date.now()});
       }else if(input.action==='asset_edit_design'){
         if(asset.status!=='draft'||!asset.design||asset.viewId||asset.kind==='variant')throw new Error('只能修改尚未生成的独立资产设计。');
-        const revised=validateAssetDesigns({assets:[{...asset.design,description:input.notes,kind:asset.kind,name:asset.name,evidence:asset.evidence}]},p)[0];
+        const revised=validateAssetDesigns({assets:[{...asset.design,description:input.notes,kind:asset.kind,name:asset.name,evidence:asset.evidence,requirement:asset.requirement,sceneIds:asset.sceneIds}]},p,{sources:asset.designOrigin==='user'?[asset.evidence??'']:undefined})[0];
         asset.design=revised.design;asset.prompt=revised.prompt;asset.promptVersion=revised.promptVersion;
       }else if(input.action==='asset_costume'||input.action==='asset_prop_state'){
         if(library.length>=160)throw new Error('资产版本达到上限。');library.push(input.action==='asset_costume'?createCostumeSet(p,input.assetId,input.notes):createPropState(p,input.assetId,input.notes));
-        asset.setReview=undefined;if(p.plan){invalidateFrom(p,0);reopenStoryboard(p);}
+        // New costume/prop candidates do not change the selected reference.
+
       }else if(input.action==='asset_use_costume'){
-        selectCostume(p,input.assetId);if(p.plan){invalidateFrom(p,0);reopenStoryboard(p);}
+        selectCostume(p,input.assetId);if(p.plan)invalidateAssetMedia(p,asset);
       }else if(input.action==='asset_set_review'){
         reviewAssetSet(p,input.assetId,input.notes);
       }else if(input.action==='asset_views'){
-        const views=createAssetViews(p,input.assetId);if(library.length+views.length>160)throw new Error('资产版本已达到 160 个上限。');library.push(...views);if(p.plan){invalidateFrom(p,0);reopenStoryboard(p);}
+        const views=createAssetViews(p,input.assetId);if(library.length+views.length>160)throw new Error('资产版本已达到 160 个上限。');library.push(...views);
       }else if(input.action==='asset_rebuild'){
         if(library.length>=160)throw new Error('每个作品最多 160 个资产版本。');library.push(rebuildAsset(p,input.assetId));
       }else if(input.action==='asset_variant'){
@@ -262,7 +276,7 @@ async function handle(input:Command):Promise<unknown>{
     }
     bump(p);await save(all);return p;
   }
-  if(p.production?.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止资产生成，再修改作品。');
+  if(!['approve_assets','continuity_review','compile','approve_render','enqueue','poll','review','prepare_assembly','complete'].includes(input.action??'')&&p.production?.library?.some(a=>a.status==='running'))throw new Error('请先完成或停止资产生成，再修改作品的核心设定。');
   if(input.action==='brief_decisions'){
     requireNode(p,'clarify');
     if(!p.brief)throw new Error('请先分析创意。');
@@ -301,7 +315,7 @@ async function handle(input:Command):Promise<unknown>{
     g.script=script;g.scriptApproved=true;g.assets={bible,seed:42,locked:false};p.title=script.title;p.revision++;transition(p,'assets','剧本已由用户确认，美术完成资产设定。');
   }else if(input.action==='approve_assets'){
     requireNode(p,'assets');const g=p.production!;
-    if(p.mode==='live'&&setting('IMAGE_PROVIDER')==='fal'){requireAssetSets(p);if(JSON.stringify(input.bible)!==JSON.stringify(g.assets!.bible))throw new Error('设定已修改，请先保存设定并重新确认对应资产，再生成分镜。');}
+    if(p.mode==='live'&&setting('IMAGE_PROVIDER')==='fal'){if(JSON.stringify(input.bible)!==JSON.stringify(g.assets!.bible))throw new Error('设定已修改，请先保存设定并重新确认对应资产，再生成分镜。');}
     const seed=finite(input.seed,0,2147483647,'Seed');if(!Number.isInteger(seed))throw new Error('Seed 必须为整数。');
     const assets={bible:validateBible(input.bible),seed,locked:true};
     const plan=await generatePlan({...p,production:{...g,assets}});g.assets=assets;p.plan={...plan,...g.script,bible:assets.bible};p.phase='planned';p.revision++;transition(p,'storyboard','资产已锁定，导演生成分镜与运镜。');
@@ -345,12 +359,12 @@ async function handle(input:Command):Promise<unknown>{
     if(!p.plan)throw new Error('请先生成分镜。');if(input.kind!=='image'&&input.kind!=='video')throw new Error('任务类型无效。');
     if(checkContinuity(p.plan).some(i=>i.level==='error'))throw new Error('请先解决连续性检查中的错误。');
     if(p.mode==='live'&&!capabilities()[input.kind as 'image'|'video'])throw new Error(input.kind==='image'?'图像服务尚未配置，请在 API 设置中选择服务并填写对应密钥。':'视频网关尚未配置。');
-    if(input.kind==='image'&&p.mode==='live'&&setting('IMAGE_PROVIDER')==='fal')requireAssetSets(p);
     const targets=input.shotId?p.plan.shots.filter(s=>s.id===input.shotId):p.plan.shots;
     if(!targets.length)throw new Error('镜头不存在。');
+    if(p.mode==='live')for(const shot of targets){const previous=p.jobs.findLast(j=>!j.assetSuperseded&&j.shotId===shot.id&&j.kind===input.kind&&j.revision===p.revision);if(!input.regenerate&&(previous?.remoteId||previous?.longTake))continue;requireReadyAssets(p,[shot.id]);}
     if(input.kind==='video')for(const s of targets){const mode=s.videoInput?.mode??'first';if(!['text','references'].includes(mode)&&(p.mode==='live'?!s.referenceUrl:s.referenceMode!=='demo'))throw new Error(s.id+' 缺少参考图首帧；可选择文字或美术参考图模式。');if(mode==='first_last'&&!s.videoInput?.lastFrameUrl)throw new Error(s.id+' 缺少尾帧。');}
     if(input.kind==='video'&&p.mode==='live')for(const shot of targets){
-      const existing=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind==='video'&&j.revision===p.revision);
+      const existing=p.jobs.findLast(j=>!j.assetSuperseded&&j.shotId===shot.id&&j.kind==='video'&&j.revision===p.revision);
       if(!input.regenerate&&existing?.remoteId&&existing.remoteId!=='fal-pending')continue;
       if(shot.duration>(currentVideoProfile().maxSeconds??Infinity))await requireFFmpeg();
       const preview=videoPreview(p,newJob(p,shot.id,'video'));if(preview.issues.length)throw new Error(shot.id+'：'+preview.issues.join(' '));
@@ -372,11 +386,11 @@ async function handle(input:Command):Promise<unknown>{
     for(const shot of targets){
       if(input.kind==='image'&&shot.referenceUrl)continue;
       if(p.jobs.some(j=>j.shotId===shot.id&&j.kind===input.kind&&['queued','running','succeeded'].includes(j.status)))continue;
-      const failed=p.jobs.findLast(j=>j.shotId===shot.id&&j.kind===input.kind&&(j.status==='failed'||(j.status==='cancelled'&&!!j.longTake))&&j.revision===p.revision);
+      const failed=p.jobs.findLast(j=>!j.assetSuperseded&&j.shotId===shot.id&&j.kind===input.kind&&(j.status==='failed'||(j.status==='cancelled'&&!!j.longTake))&&j.revision===p.revision);
       if(failed){
         requeueFailedJob(failed,p.production!.maxRetries);if(input.shotId)failed.independent=true;continue;
       }
-      if(p.jobs.filter(j=>j.shotId===shot.id&&j.kind===input.kind&&j.revision===p.revision).length>=p.production!.maxRetries+1)throw new Error('该镜头已达到本版本任务预算，请修改分镜开启新版本。');
+      if(p.jobs.filter(j=>!j.assetSuperseded&&j.shotId===shot.id&&j.kind===input.kind&&j.revision===p.revision).length>=p.production!.maxRetries+1)throw new Error('该镜头已达到本版本任务预算，请修改分镜开启新版本。');
       p.jobs.push({...newJob(p,shot.id,input.kind),independent:!!input.shotId});
     }
   }else if(input.action==='cancel'){
