@@ -10,6 +10,7 @@ import { productionSkills } from '../skills.ts';
 import { validateScreenplay } from '../screenplay.ts';
 import { designAssets, generatePlan, writeScript } from '../providers.ts';
 import { setting } from '../settings.ts';
+import { recordApproval } from '../approvals.ts';
 import { bump } from './shared.ts';
 import type { Project } from '../types.ts';
 import type { CommandHandler } from './shared.ts';
@@ -272,6 +273,7 @@ export const approveScriptHandler: CommandHandler = {
     p!.title = script.title;
     p!.revision++;
     transition(p!, 'assets', '剧本已由用户确认，美术完成资产设定。');
+    recordApproval(p!, 'script', 'script');
     bump(p!);
     await save();
     return p;
@@ -299,6 +301,7 @@ export const approveAssetsHandler: CommandHandler = {
     p!.phase = 'planned';
     p!.revision++;
     transition(p!, 'storyboard', '资产已锁定，导演生成分镜与运镜。');
+    recordApproval(p!, 'assets', 'assets');
     bump(p!);
     await save();
     return p;

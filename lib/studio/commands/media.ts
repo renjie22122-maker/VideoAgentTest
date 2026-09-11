@@ -9,9 +9,48 @@ import { miniMaxBase } from '../minimax-video.ts';
 import { requeueFailedJob } from '../job-recovery.ts';
 import { capabilities, videoPreview, currentVideoProfile, editorSkill } from '../providers.ts';
 import { setting } from '../settings.ts';
+import { recordApproval } from '../approvals.ts';
+import { estimateVideoCost, estimateImageCost } from '../durable/pricing.ts';
+import { costSummary } from '../agent/observation.ts';
 import { bump, newJob } from './shared.ts';
 import { tick } from './jobs.ts';
 import type { CommandHandler } from './shared.ts';
+
+/**
+ * Optional budget admission gate. Only active when PROJECT_BUDGET_USD is set:
+ * the estimated cost of this request plus the ledger total must stay within
+ * budget. Estimates are documented approximations, not invoices.
+ */
+function enforceBudgetGate(
+  p: import('../types.ts').Project,
+  shots: import('../types.ts').Shot[],
+  kind: 'image' | 'video',
+): void {
+  const budgetUsd = process.env.PROJECT_BUDGET_USD
+    ? Number(process.env.PROJECT_BUDGET_USD)
+    : undefined;
+  if (budgetUsd === undefined || !Number.isFinite(budgetUsd) || budgetUsd <= 0) return;
+  const estimate = shots.reduce(
+    (sum, shot) =>
+      sum +
+      (kind === 'video'
+        ? estimateVideoCost(currentVideoProfile().id, setting('VIDEO_MODEL'), shot.duration)
+        : estimateImageCost(setting('IMAGE_PROVIDER'))),
+    0,
+  );
+  const spent = costSummary(p).spentEstimated;
+  const remaining = Math.round((budgetUsd - spent - estimate) * 10000) / 10000;
+  if (remaining < 0)
+    throw new Error(
+      '预算不足：已花费约 ' +
+        spent.toFixed(4) +
+        ' USD，本次估算 ' +
+        estimate.toFixed(4) +
+        ' USD，超过预算 ' +
+        budgetUsd +
+        ' USD。请减少本次生成范围或调整 PROJECT_BUDGET_USD。',
+    );
+}
 
 /** Multi-shot grouped generation in one provider request. */
 export const enqueueGroupHandler: CommandHandler = {
@@ -41,6 +80,7 @@ export const enqueueGroupHandler: CommandHandler = {
       )
     )
       throw new Error('已有联合任务提交结果未知，请先核查供应商，不能直接重复提交。');
+    enforceBudgetGate(p!, group.shots, 'video');
     p!.jobs.push({ ...newJob(p!, group.shots[0].id, 'video'), independent: true, group });
     p!.production.events.push({
       at: Date.now(),
@@ -164,8 +204,10 @@ export const reviewHandler: CommandHandler = {
     } else if (
       g.qa.length === p!.plan!.shots.length &&
       g.qa.every((q) => q.verdict === 'passed')
-    )
+    ) {
       transition(p!, 'assembly', '全部镜头通过人工审查，进入组装。');
+      recordApproval(p!, 'qa_shot', input.shotId!);
+    }
     bump(p!);
     await save();
     return p;
@@ -200,8 +242,10 @@ export const completeHandler: CommandHandler = {
     const { project: p, save } = ctx;
     requireNode(p!, 'assembly', 'complete');
     if (!p!.production!.editPlan) throw new Error('请先生成并查看后期方案。');
-    if (p!.production!.node !== 'complete')
+    if (p!.production!.node !== 'complete') {
       transition(p!, 'complete', '用户已完成预演视频导出。');
+      recordApproval(p!, 'final', 'production');
+    }
     bump(p!);
     await save();
     return p;
@@ -234,6 +278,8 @@ export const enqueueHandler: CommandHandler = {
       ? p!.plan.shots.filter((s) => s.id === input.shotId)
       : p!.plan.shots;
     if (!targets.length) throw new Error('镜头不存在。');
+    // Budget admission: optional hard gate, documented estimates only.
+    enforceBudgetGate(p!, targets, input.kind);
     if (p!.mode === 'live')
       for (const shot of targets) {
         const previous = p!.jobs.findLast(
@@ -289,6 +335,7 @@ export const enqueueHandler: CommandHandler = {
         throw new Error('上次提交结果未知，请先核查供应商记录。');
       if (latest?.status === 'failed')
         throw new Error('失败任务请使用本镜生成 / 恢复查询，不能绕过重试保护。');
+      enforceBudgetGate(p!, [s], input.kind);
       p!.jobs.push({ ...newJob(p!, s.id, input.kind), independent: true });
       if (input.kind === 'video') delete s.videoMode;
       else {

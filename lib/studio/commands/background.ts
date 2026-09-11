@@ -1,4 +1,4 @@
-import { loadProjects, saveProjects } from './shared.ts';
+import { loadProjects, saveProjectEntry, tryAcquireProjectLock, releaseProjectLock } from './shared.ts';
 import { tick } from './jobs.ts';
 import { updateAsset } from '../assets.ts';
 
@@ -8,8 +8,9 @@ import { updateAsset } from '../assets.ts';
  *
  * It only touches work the user already submitted: running asset generation,
  * queued/running media jobs (including long-take parts). It never starts
- * media, never runs agent steps and never calls an LLM. The caller (server
- * gateway) owns the mutation lock around it.
+ * media, never runs agent steps and never calls an LLM. Each project is
+ * processed under its own lock, and each save merges only that project's
+ * entry — concurrent requests and other projects are never clobbered.
  */
 let working = false;
 
@@ -20,25 +21,30 @@ export async function backgroundTick(): Promise<boolean> {
     const all = await loadProjects();
     let advanced = false;
     for (const p of all) {
-      for (const asset of p.production?.library ?? []) {
-        if (asset.status !== 'running') continue;
-        try {
-          await updateAsset(asset);
-          advanced = true;
-        } catch (e) {
-          asset.error = e instanceof Error ? e.message : '资产跟踪失败';
-          if (!asset.remoteId) asset.status = 'failed';
+      if (!tryAcquireProjectLock(p.id)) continue;
+      try {
+        for (const asset of p.production?.library ?? []) {
+          if (asset.status !== 'running') continue;
+          try {
+            await updateAsset(asset);
+            advanced = true;
+          } catch (e) {
+            asset.error = e instanceof Error ? e.message : '资产跟踪失败';
+            if (!asset.remoteId) asset.status = 'failed';
+          }
         }
-      }
-      if (p.jobs.some((j) => j.status === 'queued' || j.status === 'running')) {
-        await tick(p, async () => {
-          p.updatedAt = Date.now();
-          await saveProjects(all);
-        });
-        advanced = true;
+        if (p.jobs.some((j) => j.status === 'queued' || j.status === 'running')) {
+          await tick(p, async () => {
+            p.updatedAt = Date.now();
+            await saveProjectEntry(p);
+          });
+          advanced = true;
+        }
+        if (advanced) await saveProjectEntry(p);
+      } finally {
+        releaseProjectLock(p.id);
       }
     }
-    if (advanced) await saveProjects(all);
     return advanced;
   } finally {
     working = false;

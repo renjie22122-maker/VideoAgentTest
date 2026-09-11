@@ -10,7 +10,7 @@
 | 协作控制 | autopilot / agent（observation、scheduler、planner、policy、router、actions、run-controller、task、capabilities）/ auto-run-state / auto-progress / team-runtime | 限定工具动作、候选与修改、去重、无进展停止、独立复核、能力授权、任务调度与记录 |
 | 语言适配 | provider-catalog / language-provider | 供应商元数据、协议转换、错误分类；不修改作品 |
 | 媒体适配 | video-profile / video-text / minimax-video / fal-video / fal / openai-images | 能力预检、可见提示词、准备输入、提交和查询 |
-| 工作台事务 | server / commands / command-policy / timeouts | 锁、载入、守卫、有序命令注册表、审批、修订备份、队列、步骤幂等与等待策略 |
+| 工作台事务 | server / commands / command-policy / timeouts | 项目级锁、合并保存、守卫、有序命令注册表、审批、修订备份、队列、步骤幂等与等待策略 |
 | 资产依赖 | asset-policy / asset-catalog / artifact-graph | 实体与候选、等级、场次匹配、增量补充、定向媒体失效与失效血缘 |
 | 界面 | production-diagnostics / auto-run-driver / auto-pilot / production-handoff / video-preflight | 只读回看、意见输入、协作推进、交接与批准 |
 | 结果等待 | media-poll-driver / media-poll-state | 跨页面串行推进已授权队列并查询已有资产任务 |
@@ -55,6 +55,8 @@ beginStep/finish   RunController       步骤记账、指纹去重、预算耗�
 ## 命令注册表
 
 `lib/studio/commands/` 按原始分发链的精确顺序组织为四组处理器（全局 → 项目只读 → 核心 → 后置），处理器可返回 `NEXT_HANDLER` 落到下一处理器。`server.ts` 只负责锁、载入、revision / autoRun 守卫、分发、持久化与错误边界。新增命令 = 新增一个带 `matches/run` 的处理器并放进对应阶段数组，不再向网关追加分支。
+
+**并发与保存**：锁是项目级的（`commands/shared.ts` 原语）——不同项目的变更并发执行，全局命令持有 `'*'` 锁并与所有项目锁互斥；由于全部项目共享单个 projects.json，项目命令的保存是**合并保存**：重新读取磁盘后只写回本项目条目（含新建项目），并发修改的其他项目不会被覆盖。后台 worker 按项目加锁、忙时跳拍。`runtime_report` 是只读可观测视图（运行/任务阻塞原因/成本/产物 manifest/批准状态），不参与锁。
 
 ## 失效血缘与 Artifact 图
 

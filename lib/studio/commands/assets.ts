@@ -23,6 +23,7 @@ import {
   updateAsset,
 } from '../assets.ts';
 import { planAssetLibrary } from '../providers.ts';
+import { recordApproval } from '../approvals.ts';
 import { bump, studioRoot } from './shared.ts';
 import type { CommandHandler } from './shared.ts';
 
@@ -212,6 +213,7 @@ export const assetHandler: CommandHandler = {
           asset.setReview = undefined;
           if (p!.plan) invalidateAssetMedia(p!, asset);
           else p!.revision++;
+          recordApproval(p!, 'asset', asset.id);
         } else if (input.action === 'asset_abandon') {
           if (asset.status !== 'running') throw new Error('该资产未在生成中。');
           asset.status = 'failed';

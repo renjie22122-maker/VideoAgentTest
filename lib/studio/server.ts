@@ -4,7 +4,15 @@ import { publicSettings } from './settings.ts';
 import { skillCatalog } from './skills.ts';
 import { readImage } from './openai-images.ts';
 import { serveTakeVideo } from './take-media.ts';
-import { loadProjects, saveProjects, NEXT_HANDLER } from './commands/shared.ts';
+import {
+  loadProjects,
+  saveProjects,
+  NEXT_HANDLER,
+  tryAcquireProjectLock,
+  tryAcquireGlobalLock,
+  releaseProjectLock,
+  anyProjectLock,
+} from './commands/shared.ts';
 import type { Command, CommandContext, CommandHandler } from './commands/shared.ts';
 import { globalCommandHandlers } from './commands/global.ts';
 import { readonlyProjectHandlers } from './commands/readonly.ts';
@@ -16,27 +24,32 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 export type { Command } from './commands/shared.ts';
 export { globalCommandHandlers, readonlyProjectHandlers, coreCommandHandlers, lateCommandHandlers };
 
-let mutating = false;
-
 /**
  * Command gateway.
  *
  * dispatch keeps only: locking, load, revision guard, ordered registry
- * dispatch, persistence and the error boundary. Domain rules live in the
- * command handlers; storage lives in commands/shared.ts.
+ * dispatch, persistence and the error boundary. Locks are project-scoped:
+ * mutations of different projects run concurrently, and each save merges only
+ * its own entry back into the shared file.
  */
 export async function dispatch(input: Command): Promise<unknown> {
   // Atomic file replacement lets readers see the last committed state during generation.
   if (isReadOnlyCommand(input.action ?? '')) return handle(input);
-  if (mutating)
-    throw new Error(
-      '工作台正在处理上一项操作，请等待完成后再提交。可重新打开作品查看已保存结果。',
-    );
-  mutating = true;
+  const busy = () =>
+    new Error('工作台正在处理上一项操作，请等待完成后再提交。可重新打开作品查看已保存结果。');
+  if (input.action === 'create' || input.action === 'save_settings' || !input.id) {
+    if (!tryAcquireGlobalLock()) throw busy();
+    try {
+      return await handle(input);
+    } finally {
+      releaseProjectLock('*');
+    }
+  }
+  if (!tryAcquireProjectLock(input.id)) throw busy();
   try {
     return await handle(input);
   } finally {
-    mutating = false;
+    releaseProjectLock(input.id);
   }
 }
 
@@ -53,7 +66,7 @@ async function runHandlers(
 }
 
 async function handle(input: Command): Promise<unknown> {
-  if (input.action === 'status') return { ...capabilities(), runtimeBusy: mutating };
+  if (input.action === 'status') return { ...capabilities(), runtimeBusy: anyProjectLock() };
   if (input.action === 'settings') return publicSettings();
   if (input.action === 'skills') return skillCatalog();
   const all = await loadProjects();
@@ -62,7 +75,21 @@ async function handle(input: Command): Promise<unknown> {
   if (globalResult !== NEXT_HANDLER) return globalResult;
   const p = all.find((x) => x.id === input.id);
   if (!p) throw new Error('项目不存在。');
-  const ctx: CommandContext = { input, all, project: p, save: () => saveProjects(all) };
+  // Project-scoped save: merge only this project's entry (plus new projects
+  // created during the command) back into the shared file, preserving any
+  // concurrent changes to other projects.
+  const ctx: CommandContext = {
+    input,
+    all,
+    project: p,
+    save: async () => {
+      const disk = await loadProjects();
+      const byId = new Map(disk.map((x) => [x.id, x]));
+      byId.set(p.id, p);
+      for (const entry of all) if (!byId.has(entry.id)) byId.set(entry.id, entry);
+      await saveProjects([...byId.values()]);
+    },
+  };
   // Read-only project commands run before the guards: stale tabs can reconcile.
   const readResult = await runHandlers(readonlyProjectHandlers, ctx);
   if (readResult !== NEXT_HANDLER) return readResult;
@@ -196,21 +223,15 @@ export function studioMiddleware(req: IncomingMessage, res: ServerResponse, next
 
 /**
  * Server-side media worker: advances approved generation and asset tracking
- * while the tab is closed. It shares the global mutation lock with requests —
- * a busy request just skips one beat. Set STUDIO_BACKGROUND_WORKER=0 to disable.
- * It never starts new work, never runs agent steps, never spends beyond what
- * the user already enqueued.
+ * while the tab is closed. It takes per-project locks like any mutation —
+ * a busy project skips one beat; other projects keep progressing. Set
+ * STUDIO_BACKGROUND_WORKER=0 to disable. It never starts new work, never runs
+ * agent steps, never spends beyond what the user already enqueued.
  */
 export function startBackgroundWorker(intervalMs = 3000): () => void {
   if (process.env.STUDIO_BACKGROUND_WORKER === '0') return () => {};
   const timer = setInterval(() => {
-    if (mutating) return;
-    mutating = true;
-    void backgroundTick()
-      .catch(() => {})
-      .finally(() => {
-        mutating = false;
-      });
+    void backgroundTick().catch(() => {});
   }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

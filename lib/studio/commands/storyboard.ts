@@ -12,6 +12,7 @@ import { saveAssetUpload } from '../asset-upload.ts';
 import { mergeShotPair } from '../shot-merge.ts';
 import { MOTION_SCHEMA, validateMotion } from '../motion.ts';
 import { roleJSON, continuitySkill, compilerSkill } from '../providers.ts';
+import { recordApproval } from '../approvals.ts';
 import { bump, studioRoot } from './shared.ts';
 import type { CommandHandler } from './shared.ts';
 
@@ -209,6 +210,7 @@ export const approveRenderHandler: CommandHandler = {
     requireNode(p!, 'prompts');
     p!.production!.renderApprovedRevision = p!.revision;
     transition(p!, 'generation', '用户批准当前版本分镜与提示词。');
+    recordApproval(p!, 'render', 'render');
     bump(p!);
     await save();
     return p;

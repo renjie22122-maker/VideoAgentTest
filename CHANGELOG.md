@@ -1,5 +1,20 @@
 # 更新记录
 
+## 2026-09-15 · 运行时硬化：项目级锁、预算准入、可观测报告与批准事件
+
+完成评审清单中剩余的运行时安全与可观测项。
+
+### 新增
+
+- **项目级互斥锁 + 合并保存**：`dispatch` 按项目加锁（不同项目可并发，全局命令用 '*' 锁冲突所有项目），项目命令保存时只把**本项目条目（及新建项目）合并回共享文件**——并发修改其他项目不再被覆盖；后台 worker 同样按项目加锁、忙时跳拍。锁与合并原语在 `commands/shared.ts`，报错语义不变。
+- **预算准入门**：设置 `PROJECT_BUDGET_USD` 后，`enqueue` / `enqueue_group` / 重新生成在创建任务前用成本台账累计 + 本次估算做硬性预检，超限即拒绝（默认关闭，估算非发票）。
+- **`runtime_report` 只读命令**：一次拿到运行状态、任务（含 blockedBy/result/verification）、成本摘要、产物 manifest（版本/状态）与批准事件状态——Agent Observability 的单一视图，不写不锁。
+- **Approval 领域事件**：`production.approvalEvents` 只增有界记录剧本/资产/渲染/单镜 QA/终局批准（who/what/revision/at），状态按 revision 计算 approved / expired；布尔门保持权威执行语义不变。
+
+### 文档与验证
+
+- 新增 runtime-hardening 测试（锁冲突矩阵、合并保存保并发、预算门禁、批准事件、runtime_report）；55 个测试文件、typecheck、lint、build 四 gate 全部通过。
+
 ## 2026-09-15 · 任务恢复一致性收口：提交边界与状态冲突规则
 
 按第六轮评审把"任务四阶段（开始执行 / 执行结束 / 结果提交 / 恢复重建）"定义清楚：模型执行结束 ≠ 创作结果已持久保存；账本里的 completed 不能单独证明依赖已满足。

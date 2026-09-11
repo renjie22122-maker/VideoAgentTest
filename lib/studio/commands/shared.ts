@@ -57,6 +57,45 @@ export type CommandContext = {
   save: () => Promise<void>;
 };
 
+/**
+ * Project-scoped mutation locks. The key '*' is the global lock, held by
+ * global mutations and conflicting with every project lock. Reads never lock.
+ */
+const projectLocks = new Map<string, boolean>();
+
+export function tryAcquireProjectLock(projectId: string): boolean {
+  if (projectLocks.has(projectId) || projectLocks.has('*')) return false;
+  projectLocks.set(projectId, true);
+  return true;
+}
+
+export function tryAcquireGlobalLock(): boolean {
+  if (projectLocks.size) return false;
+  projectLocks.set('*', true);
+  return true;
+}
+
+export function releaseProjectLock(projectId: string): void {
+  projectLocks.delete(projectId);
+}
+
+export function anyProjectLock(): boolean {
+  return projectLocks.size > 0;
+}
+
+/**
+ * Merge-save for project-scoped mutations: the single projects.json file is
+ * shared, so a save must only write THIS project's entry (plus newly created
+ * projects) and preserve concurrent changes to other projects from disk.
+ */
+export async function saveProjectEntry(project: Project, additions: Project[] = []): Promise<void> {
+  const disk = await loadProjects();
+  const byId = new Map(disk.map((x) => [x.id, x]));
+  byId.set(project.id, project);
+  for (const entry of additions) byId.set(entry.id, entry);
+  await saveProjects([...byId.values()]);
+}
+
 export interface CommandHandler {
   /** Primary action this handler serves; used for registry introspection. */
   readonly action: string;

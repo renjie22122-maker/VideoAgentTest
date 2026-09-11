@@ -8,6 +8,7 @@ const readOnly = new Set([
   'shot_image_prompt',
   'video_preview',
   'quality_report',
+  'runtime_report',
 ]);
 export function isReadOnlyCommand(action: string) {
   return readOnly.has(action);

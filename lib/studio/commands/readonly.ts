@@ -2,6 +2,10 @@ import { validateAutoStep } from '../auto-run-state.ts';
 import { buildQualityReport } from '../quality-report.ts';
 import { requireFFmpeg } from '../take-media.ts';
 import { mediaInput, videoPreview } from '../providers.ts';
+import { costSummary } from '../agent/observation.ts';
+import { artifactManifest } from '../artifact-graph.ts';
+import { blockedReason } from '../agent/scheduler.ts';
+import { approvalStatus } from '../approvals.ts';
 import { NEXT_HANDLER, newJob } from './shared.ts';
 import type { CommandHandler } from './shared.ts';
 
@@ -38,6 +42,66 @@ export const readonlyProjectHandlers = [
     matches: (input) => input.action === 'quality_report',
     async run({ project }) {
       return buildQualityReport(project!);
+    },
+  },
+  {
+    action: 'runtime_report',
+    matches: (input) => input.action === 'runtime_report',
+    async run({ project }) {
+      // Agent observability: why/what/who/cost/state in one read-only view.
+      const p = project!;
+      const run = p.production?.autoRun;
+      const tasks = run?.tasks ?? [];
+      return {
+        projectId: p.id,
+        revision: p.revision,
+        node: p.production?.node,
+        run: run
+          ? {
+              id: run.id,
+              status: run.status,
+              steps: run.steps,
+              maxSteps: run.maxSteps,
+              stopReason: run.stopReason ?? null,
+              summary: run.summary ?? null,
+              pendingReview: run.pendingReview
+                ? { authorRoleId: run.pendingReview.authorRoleId, revision: run.pendingReview.revision }
+                : null,
+            }
+          : null,
+        tasks: tasks.map((t) => ({
+          id: t.id,
+          kind: t.kind,
+          status: t.status,
+          ownerRoleId: t.ownerRoleId,
+          capability: t.capability ?? null,
+          dependsOn: t.dependsOn,
+          attempts: t.attempts,
+          blockedBy:
+            t.status === 'pending' || t.status === 'verification'
+              ? (blockedReason(t, tasks) ?? null)
+              : null,
+          result: t.result?.outcome ?? null,
+          verification: t.verification
+            ? { required: true, authorRoleId: t.verification.authorRoleId }
+            : undefined,
+        })),
+        cost: costSummary(p),
+        artifacts: artifactManifest(p).map((n) => ({
+          kind: n.ref.kind,
+          id: n.ref.id,
+          status: n.status,
+          version: n.version ?? null,
+          producedAt: n.producedAt ?? null,
+        })),
+        approvals: (p.production?.approvalEvents ?? []).map((e) => ({
+          type: e.type,
+          target: e.target,
+          approvedBy: e.approvedBy,
+          at: e.at,
+          status: approvalStatus(e, p.revision),
+        })),
+      };
     },
   },
   {
