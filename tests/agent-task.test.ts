@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+
+// File-level isolation: demo tests must never touch the real .studio ledger.
+process.env.STUDIO_DATA_DIR = await mkdtemp(path.join(tmpdir(), 'agent-task-isolated-'));
 import { autoStep, createAutoRun, syncVerificationTask } from '../lib/studio/autopilot.ts';
 import type { AgentTask } from '../lib/studio/autopilot.ts';
 import { demoPlan } from '../lib/studio/domain.ts';

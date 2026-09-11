@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+// File-level isolation: demo tests must never touch the real .studio ledger.
+process.env.STUDIO_DATA_DIR = await mkdtemp(path.join(tmpdir(), 'agent-runtime-isolated-'));
 import {
   getAgentAction,
   registeredAgentActions,

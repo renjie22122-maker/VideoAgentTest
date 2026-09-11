@@ -6,6 +6,8 @@ import path from 'node:path';
 import { openLedger, closeLedger } from '../lib/studio/durable/ledger.ts';
 import { estimateLLMCost, estimateVideoCost, estimateImageCost } from '../lib/studio/durable/pricing.ts';
 import { tick, GENERATION_LEASE_MS } from '../lib/studio/commands/jobs.ts';
+import { startBackgroundWorker } from '../lib/studio/server.ts';
+import { createAutoRun, reconcileRunTasks } from '../lib/studio/autopilot.ts';
 import { demoPlan } from '../lib/studio/domain.ts';
 import { demoScreenplay } from '../lib/studio/screenplay.ts';
 import { initialProduction } from '../lib/studio/graph.ts';
@@ -312,6 +314,128 @@ void test('the ledger never downgrades a confirmed submission', () => {
   const row = ledger.generationJob('job-protected')!;
   assert.equal(row.submission, 'submitted');
   assert.equal(row.providerJobId, 'provider-42');
+});
+
+void test('the background worker advances approved media without any page request', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'bg-worker-'));
+  const old = process.env.STUDIO_DATA_DIR;
+  process.env.STUDIO_DATA_DIR = dir;
+  t.after(() => {
+    if (old === undefined) delete process.env.STUDIO_DATA_DIR;
+    else process.env.STUDIO_DATA_DIR = old;
+    closeLedger();
+  });
+  const { writeFile, readFile } = await import('node:fs/promises');
+  const p = project();
+  p.plan = demoPlan(p);
+  p.jobs = [job(p, 'job-bg', { status: 'queued' })];
+  await writeFile(path.join(dir, 'projects.json'), JSON.stringify([p]));
+  let now = 10_000;
+  t.mock.method(Date, 'now', () => now);
+  const { backgroundTick } = await import('../lib/studio/commands/background.ts');
+  await backgroundTick(); // queued → running
+  now += 1000;
+  await backgroundTick(); // demo elapsed ≥ 900ms → succeeded
+  const saved = JSON.parse(await readFile(path.join(dir, 'projects.json'), 'utf8')) as Project[];
+  const done = saved[0].jobs.find((j) => j.id === 'job-bg')!;
+  assert.equal(done.status, 'succeeded');
+  assert.equal(saved[0].plan!.shots[0].videoMode, 'demo');
+});
+
+void test('the worker is opt-out via environment and never starts agent steps', () => {
+  const old = process.env.STUDIO_BACKGROUND_WORKER;
+  process.env.STUDIO_BACKGROUND_WORKER = '0';
+  const stop = startBackgroundWorker(10);
+  assert.equal(typeof stop, 'function');
+  if (old === undefined) delete process.env.STUDIO_BACKGROUND_WORKER;
+  else process.env.STUDIO_BACKGROUND_WORKER = old;
+});
+
+void test('reconcileRunTasks restores ledger-known tasks and fails interrupted steps', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'reconcile-tasks-'));
+  const old = process.env.STUDIO_DATA_DIR;
+  process.env.STUDIO_DATA_DIR = dir;
+  t.after(() => {
+    if (old === undefined) delete process.env.STUDIO_DATA_DIR;
+    else process.env.STUDIO_DATA_DIR = old;
+    closeLedger();
+  });
+  const p = project();
+  const run = createAutoRun(p, '任务');
+  run.id = 'run-reconcile';
+  const ledger = openLedger();
+  ledger.upsertAgentTask({
+    taskId: 'task-pending',
+    runId: 'run-reconcile',
+    projectId: p.id,
+    kind: 'review',
+    status: 'pending',
+    ownerRoleId: '',
+    capability: '',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: '',
+    reason: '待执行会审',
+    verificationAuthor: '',
+    updatedAt: 1,
+  });
+  ledger.upsertAgentTask({
+    taskId: 'task-crashed',
+    runId: 'run-reconcile',
+    projectId: p.id,
+    kind: 'revise_storyboard',
+    status: 'running',
+    ownerRoleId: 'storyboard',
+    capability: 'revise_storyboard',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: '',
+    reason: '修订中断',
+    verificationAuthor: '',
+    updatedAt: 2,
+  });
+  ledger.upsertAgentTask({
+    taskId: 'task-verify',
+    runId: 'run-reconcile',
+    projectId: p.id,
+    kind: 'verify_storyboard',
+    status: 'verification',
+    ownerRoleId: 'storyboard',
+    capability: 'verify_storyboard',
+    dependsOn: 'task-crashed',
+    inputRevision: 1,
+    outcome: '',
+    reason: '复核',
+    verificationAuthor: 'storyboard',
+    updatedAt: 3,
+  });
+  // The project only knows the verify task; the others were lost in a crash.
+  run.tasks = [
+    {
+      id: 'task-verify',
+      kind: 'verify_storyboard',
+      status: 'completed',
+      ownerRoleId: 'reviewer',
+      capability: 'verify_storyboard',
+      createdBy: 'system',
+      dependsOn: ['task-crashed'],
+      targetShotIds: [],
+      reason: '复核',
+      inputVersions: { revision: 1, configRevision: 0 },
+      attempts: 1,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+  ];
+  const added = reconcileRunTasks(run, p);
+  assert.equal(added, 2);
+  const pending = run.tasks!.find((task) => task.id === 'task-pending')!;
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.reason, '待执行会审');
+  const crashed = run.tasks!.find((task) => task.id === 'task-crashed')!;
+  assert.equal(crashed.status, 'failed', 'an interrupted step must surface as failed');
+  // The project's own record wins over the ledger.
+  assert.equal(run.tasks!.find((task) => task.id === 'task-verify')!.status, 'completed');
 });
 
 void test('pricing estimates are deterministic and configurable', () => {

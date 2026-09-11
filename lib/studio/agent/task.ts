@@ -5,7 +5,7 @@ import type { CapabilityId } from './capabilities.ts';
 import { safely } from '../durable/ledger.ts';
 
 /** Persist a task at creation time: pending work is durable before it runs. */
-function persistTask(task: AgentTask, run: AutoRun, p: Project) {
+export function persistTaskRecord(task: AgentTask, run: AutoRun, p: Project) {
   safely((ledger) =>
     ledger.upsertAgentTask({
       taskId: task.id,
@@ -127,8 +127,60 @@ export function materializeDecisionTask(
   };
   list.push(task);
   if (list.length > 200) list.splice(0, list.length - 200);
-  persistTask(task, run, p);
+  persistTaskRecord(task, run, p);
   return task;
+}
+
+/**
+ * Reconcile the run's task list with the durable ledger: hydrate tasks the
+ * ledger knows but the project lost (crash between ledger write and project
+ * save). Existing task records win; a task that died mid-step ('running' in
+ * the ledger) is restored as failed — the run must never resume an
+ * interrupted step silently.
+ */
+export function reconcileRunTasks(run: AutoRun, p: Project): number {
+  const rows = safely((ledger) => ledger.agentTasks(run.id ?? '')) ?? [];
+  if (!rows.length) return 0;
+  const tasks = (run.tasks ??= []);
+  const known = new Set(tasks.map((t) => t.id));
+  let added = 0;
+  for (const row of rows) {
+    if (known.has(row.taskId)) continue;
+    const kind = row.kind as AgentTaskKind;
+    const status = row.status === 'running' ? 'failed' : (row.status as AgentTaskStatus);
+    tasks.push({
+      id: row.taskId,
+      kind,
+      status,
+      ownerRoleId: row.ownerRoleId,
+      ...(row.capability ? { capability: row.capability as CapabilityId } : {}),
+      createdBy: 'system',
+      dependsOn: row.dependsOn ? row.dependsOn.split(',') : [],
+      targetShotIds: [],
+      reason: row.reason,
+      inputVersions: {
+        revision: row.inputRevision,
+        configRevision: p.production?.agentConfigRevision ?? 0,
+      },
+      attempts: status === 'failed' ? 1 : 0,
+      createdAt: row.updatedAt,
+      updatedAt: row.updatedAt,
+      ...(row.outcome
+        ? { result: { outcome: row.outcome as AgentTaskResult['outcome'] } }
+        : {}),
+      ...(kind === 'verify_storyboard'
+        ? {
+            verification: {
+              required: true,
+              authorRoleId: row.verificationAuthor || row.ownerRoleId,
+              previousFindings: [],
+            },
+          }
+        : {}),
+    });
+    added++;
+  }
+  return added;
 }
 
 /**
@@ -165,7 +217,7 @@ export function materializePlanTasks(
     };
     list.push(task);
     created.push(task);
-    persistTask(task, run, p);
+    persistTaskRecord(task, run, p);
     previous = task.id;
   }
   if (list.length > 200) list.splice(0, list.length - 200);
@@ -217,6 +269,6 @@ export function syncVerificationTask(run: AutoRun, p: Project): AgentTask | unde
   };
   list.push(task);
   if (list.length > 200) list.splice(0, list.length - 200);
-  persistTask(task, run, p);
+  persistTaskRecord(task, run, p);
   return task;
 }

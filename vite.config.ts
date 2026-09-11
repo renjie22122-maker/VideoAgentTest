@@ -3,7 +3,7 @@ import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig, type ViteDevServer } from 'vite';
 import hostingConfig from './.openai/hosting.json';
-import { studioMiddleware } from './lib/studio/server';
+import { studioMiddleware, startBackgroundWorker } from './lib/studio/server';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   '00000000-0000-4000-8000-000000000000';
@@ -49,7 +49,7 @@ export default defineConfig(async () => {
     css: { postcss: { plugins: [tailwindcss()] } },
     server: { host: '127.0.0.1', ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}) },
     plugins: [
-      { name: 'frame-local-api', configureServer(server: ViteDevServer) { server.middlewares.use(studioMiddleware); } },
+      { name: 'frame-local-api', configureServer(server: ViteDevServer) { server.middlewares.use(studioMiddleware); startBackgroundWorker(); } },
       vinext(),
       sites(),
       cloudflare({

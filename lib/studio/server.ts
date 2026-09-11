@@ -9,6 +9,7 @@ import type { Command, CommandContext, CommandHandler } from './commands/shared.
 import { globalCommandHandlers } from './commands/global.ts';
 import { readonlyProjectHandlers } from './commands/readonly.ts';
 import { coreCommandHandlers, lateCommandHandlers } from './commands/registry.ts';
+import { backgroundTick } from './commands/background.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 // Registry surface for tests and future extensions.
@@ -98,8 +99,7 @@ async function handle(input: Command): Promise<unknown> {
   throw new Error('未知操作。');
 }
 
-export function studioMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
-  if (req.url?.startsWith('/api/studio-videos/')) {
+export function studioMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {  if (req.url?.startsWith('/api/studio-videos/')) {
     const match = /^\/api\/studio-videos\/([a-f0-9-]{36})\.mp4$/.exec(req.url);
     if (
       !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '') ||
@@ -192,4 +192,26 @@ export function studioMiddleware(req: IncomingMessage, res: ServerResponse, next
       .then((result) => send(200, { data: result }))
       .catch((e) => send(400, { error: e instanceof Error ? e.message : '请求失败' }));
   });
+}
+
+/**
+ * Server-side media worker: advances approved generation and asset tracking
+ * while the tab is closed. It shares the global mutation lock with requests —
+ * a busy request just skips one beat. Set STUDIO_BACKGROUND_WORKER=0 to disable.
+ * It never starts new work, never runs agent steps, never spends beyond what
+ * the user already enqueued.
+ */
+export function startBackgroundWorker(intervalMs = 3000): () => void {
+  if (process.env.STUDIO_BACKGROUND_WORKER === '0') return () => {};
+  const timer = setInterval(() => {
+    if (mutating) return;
+    mutating = true;
+    void backgroundTick()
+      .catch(() => {})
+      .finally(() => {
+        mutating = false;
+      });
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }

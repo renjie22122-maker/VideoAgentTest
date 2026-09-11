@@ -6,7 +6,7 @@ import { planDecision } from './agent/planner.ts';
 import type { AutoDecision, PlanOutcome } from './agent/planner.ts';
 import { evaluateAutoDecision } from './agent/policy.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
-import { syncVerificationTask, materializeDecisionTask, materializePlanTasks } from './agent/task.ts';
+import { syncVerificationTask, materializeDecisionTask, materializePlanTasks, reconcileRunTasks, persistTaskRecord } from './agent/task.ts';
 import type { AgentTask } from './agent/task.ts';
 import { getAgentAction, registeredAgentActions, describeAllowedActions } from './agent/actions/registry.ts';
 import { nextScheduledTask } from './agent/scheduler.ts';
@@ -23,7 +23,7 @@ export type { PolicyVerdict, PolicyViolation } from './agent/policy.ts';
 export { buildObservation, unresolvedFindings } from './agent/observation.ts';
 export { getAgentAction, registeredAgentActions, agentActions, describeAllowedActions } from './agent/actions/registry.ts';
 export { beginStep, finishStep } from './agent/run-controller.ts';
-export { syncVerificationTask, openVerificationTask, taskKindForAction, actionForTaskKind, materializeDecisionTask, materializePlanTasks } from './agent/task.ts';
+export { syncVerificationTask, openVerificationTask, taskKindForAction, actionForTaskKind, materializeDecisionTask, materializePlanTasks, reconcileRunTasks, persistTaskRecord } from './agent/task.ts';
 export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from './agent/task.ts';
 export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities, satisfiesCapabilityRequirement } from './agent/capabilities.ts';
 export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
@@ -54,6 +54,9 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   }
   if (run.pendingReview && run.pendingReview.revision !== p.revision)
     delete run.pendingReview;
+  // Reconcile the task list with the durable ledger first: tasks persisted
+  // before a crash are restored; interrupted steps surface as failed.
+  reconcileRunTasks(run, p);
   // pendingReview is mirrored by an explicit verification task (AUTHOR != VERIFIER).
   // Legacy pendingReview without a task is migrated here; from then on only the
   // scheduler decides whether verification may run.
@@ -136,6 +139,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
       if (task && task.status === 'running') {
         task.status = 'failed';
         task.updatedAt = Date.now();
+        persistTaskRecord(task, run, p);
       }
       throw error;
     }
