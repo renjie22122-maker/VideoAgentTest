@@ -14,6 +14,10 @@ export type ArtifactNode = {
   ref: ArtifactRef;
   /** current = usable; stale = downstream of a recorded change; archived = superseded versions. */
   status: 'current' | 'stale' | 'archived';
+  /** Where evidence exists: the artifact's own version identity. */
+  version?: number;
+  /** Where evidence exists: when this version was produced (ms epoch). */
+  producedAt?: number;
 };
 export type DependencyType =
   | 'depicts'
@@ -31,9 +35,9 @@ const key = (ref: ArtifactRef) => ref.kind + ':' + ref.id;
 export function buildArtifactGraph(p: Project): ArtifactGraph {
   const nodes: ArtifactNode[] = [];
   const dependencies: ArtifactDependency[] = [];
-  const addNode = (ref: ArtifactRef, status: ArtifactNode['status']) => {
+  const addNode = (ref: ArtifactRef, status: ArtifactNode['status'], meta: { version?: number; producedAt?: number } = {}) => {
     if (nodes.some((n) => same(n.ref, ref))) return;
-    nodes.push({ ref, status });
+    nodes.push({ ref, status, ...meta });
   };
   const addDep = (from: ArtifactRef, to: ArtifactRef, reason: DependencyType) => {
     if (dependencies.some((d) => same(d.from, from) && same(d.to, to) && d.reason === reason)) return;
@@ -41,7 +45,11 @@ export function buildArtifactGraph(p: Project): ArtifactGraph {
   };
   if (p.production?.script) addNode({ id: 'script', kind: 'script' }, 'current');
   for (const asset of p.production?.library ?? []) {
-    addNode({ id: asset.id, kind: 'asset' }, asset.retired ? 'archived' : 'current');
+    addNode(
+      { id: asset.id, kind: 'asset' },
+      asset.retired ? 'archived' : 'current',
+      { version: asset.version, producedAt: asset.createdAt },
+    );
   }
   for (const shot of p.plan?.shots ?? []) {
     addNode({ id: shot.id, kind: 'shot' }, 'current');
@@ -49,23 +57,43 @@ export function buildArtifactGraph(p: Project): ArtifactGraph {
       addDep({ id: shot.id, kind: 'shot' }, { id: 'script', kind: 'script' }, 'depicts');
     for (const assetId of shot.videoInput?.assetIds ?? [])
       addDep({ id: shot.id, kind: 'shot' }, { id: assetId, kind: 'asset' }, 'uses_reference');
-    const hasPrompt = p.production?.prompts?.some((v) => v.shotId === shot.id);
-    if (hasPrompt) {
-      addNode({ id: shot.id, kind: 'prompt' }, 'current');
+    const promptEntry = p.production?.prompts?.find((v) => v.shotId === shot.id);
+    if (promptEntry) {
+      addNode(
+        { id: shot.id, kind: 'prompt' },
+        'current',
+        { version: promptEntry.revision },
+      );
       addDep({ id: shot.id, kind: 'prompt' }, { id: shot.id, kind: 'shot' }, 'compiled_from');
     }
     if (shot.videoUrl || shot.videoMode) {
-      addNode({ id: shot.id, kind: 'video' }, 'current');
+      const videoJobs = p.jobs.filter(
+        (j) => !j.assetSuperseded && j.shotId === shot.id && j.kind === 'video',
+      );
+      const latest = videoJobs.findLast((j) => j.status === 'succeeded') ?? videoJobs.at(-1);
+      addNode(
+        { id: shot.id, kind: 'video' },
+        'current',
+        {
+          version: videoJobs.length || 1,
+          producedAt: latest?.finishedAt ?? latest?.createdAt,
+        },
+      );
       addDep(
         { id: shot.id, kind: 'video' },
-        hasPrompt
+        promptEntry
           ? { id: shot.id, kind: 'prompt' }
           : { id: shot.id, kind: 'shot' },
         'generated_from',
       );
     }
-    if (p.production?.qa.some((q) => q.shotId === shot.id)) {
-      addNode({ id: shot.id, kind: 'qa' }, 'current');
+    const qaEntry = p.production?.qa.find((q) => q.shotId === shot.id);
+    if (qaEntry) {
+      addNode(
+        { id: shot.id, kind: 'qa' },
+        'current',
+        { version: qaEntry.attempt + 1 },
+      );
       addDep({ id: shot.id, kind: 'qa' }, { id: shot.id, kind: 'video' }, 'reviewed_by');
     }
   }
@@ -116,11 +144,10 @@ export function recordInvalidation(p: Project, changed: ArtifactRef[], affected:
 /**
  * Artifact manifest: every artifact with its lineage-derived status.
  *
- * An artifact is stale only when a recorded change affects it AND no
- * regeneration evidence exists after that change. For videos, a succeeded
- * job finished after the latest affecting event proves the current output
- * was produced from the new inputs — it is current, not stale. History is
- * never deleted; archived stays archived.
+ * An artifact is stale only when a recorded change affects it AND its own
+ * production evidence (producedAt, e.g. a succeeded job finished after the
+ * event) does not post-date the latest affecting event. Version identity is
+ * recorded on the node where evidence exists; history is never deleted.
  */
 export function artifactManifest(p: Project): ArtifactNode[] {
   const graph = buildArtifactGraph(p);
@@ -133,21 +160,12 @@ export function artifactManifest(p: Project): ArtifactNode[] {
         latestAffecting.set(k, event.at);
     }
   }
-  const regeneratedAt = (ref: ArtifactRef): number => {
-    if (ref.kind !== 'video') return 0;
-    const finished = p.jobs
-      .filter(
-        (j) => j.shotId === ref.id && j.kind === 'video' && j.status === 'succeeded' && j.finishedAt,
-      )
-      .map((j) => j.finishedAt!);
-    return finished.length ? Math.max(...finished) : 0;
-  };
   return graph.nodes.map((n) => {
     if (n.status === 'archived') return n;
     const affectedAt = latestAffecting.get(key(n.ref));
-    const fresh = affectedAt !== undefined && regeneratedAt(n.ref) > affectedAt;
+    const fresh = affectedAt !== undefined && n.producedAt !== undefined && n.producedAt > affectedAt;
     return {
-      ref: n.ref,
+      ...n,
       status: affectedAt === undefined || fresh ? 'current' : 'stale',
     };
   });

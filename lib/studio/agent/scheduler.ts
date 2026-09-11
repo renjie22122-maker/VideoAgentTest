@@ -1,19 +1,19 @@
 import type { AgentDefinition } from '../team-config.ts';
 import type { AutoRun } from '../auto-run-state.ts';
 import type { AgentTask } from './task.ts';
+import { actionForTaskKind } from './task.ts';
 import type { AutoDecision } from './planner.ts';
-import { selectVerifier } from './router.ts';
+import { routeCapability, selectVerifier } from './router.ts';
 
 /**
  * Task Scheduler (sequential kernel). The agent loop serves tasks: before
- * asking the LLM what to do next, the runtime checks whether a pre-planned
- * task has become runnable. Today the only pre-planned task kind is
- * verify_storyboard; the planner still plans the rest.
+ * asking the LLM what to do next, the runtime checks whether any pre-planned
+ * task has become runnable. The planner still proposes new work, but its
+ * follow-up plans and the verification gate run purely through this
+ * scheduler — dependencies decide, not another LLM call.
  *
  * Readiness semantics are strict: every dependency must EXIST and be
- * completed. A missing or non-completed dependency blocks the task — being
- * lenient here would let truncated or buggy task graphs run ahead of their
- * prerequisites.
+ * completed. A missing or non-completed dependency blocks the task.
  *
  * The scheduler returns a discriminated result so the runtime can never
  * mistake "nothing to do" for "work exists but must not run yet":
@@ -23,7 +23,6 @@ import { selectVerifier } from './router.ts';
  *   waiting → a runnable task has no eligible agent; wait for the user
  *   idle    → no pre-planned work; the planner may propose new work
  */
-export type ScheduledDecision = { task: AgentTask; decision: AutoDecision };
 export type SchedulerResult =
   | { kind: 'ready'; task: AgentTask; decision: AutoDecision }
   | { kind: 'blocked'; task: AgentTask; reason: string }
@@ -50,31 +49,47 @@ export function runnableTasks(run: AutoRun): AgentTask[] {
   );
 }
 
+/** Turn a runnable task into a decision: verify routes a verifier; others prefer the owner role, then route by capability. */
+export function decisionForTask(
+  task: AgentTask,
+  roles: readonly AgentDefinition[],
+): AutoDecision | undefined {
+  if (task.kind === 'verify_storyboard') {
+    const reviewer = selectVerifier(roles, task.verification?.authorRoleId ?? '');
+    if (!reviewer) return undefined;
+    return {
+      roleId: reviewer.id,
+      action: 'review',
+      reason:
+        '复核上一轮分镜修改，逐项核对原问题是否解决及是否引入新问题；仅评估当前版本文本。',
+      targets: task.targetShotIds,
+    };
+  }
+  const action = actionForTaskKind[task.kind];
+  if (!action) return undefined;
+  let role = task.ownerRoleId
+    ? roles.find((r) => r.id === task.ownerRoleId)
+    : undefined;
+  if (!role && task.capability) role = routeCapability(roles, task.capability);
+  if (!role) return undefined;
+  return { roleId: role.id, action, reason: task.reason, targets: task.targetShotIds };
+}
+
 export function nextScheduledTask(
   run: AutoRun,
   roles: readonly AgentDefinition[],
 ): SchedulerResult {
   const tasks = run.tasks ?? [];
   const open = tasks.filter((t) => t.status === 'pending' || t.status === 'verification');
-  const verify = open.find((t) => t.kind === 'verify_storyboard');
-  if (!verify) return { kind: 'idle' };
-  const blocked = blockedReason(verify, tasks);
-  if (blocked) return { kind: 'blocked', task: verify, reason: blocked };
-  const reviewer = selectVerifier(roles, verify.verification?.authorRoleId ?? '');
-  if (!reviewer)
-    return {
-      kind: 'waiting',
-      task: verify,
-      reason: '缺少具备独立复核能力的已启用岗位。',
-    };
-  return {
-    kind: 'ready',
-    task: verify,
-    decision: {
-      roleId: reviewer.id,
-      action: 'review',
-      reason:
-        '复核上一轮分镜修改，逐项核对原问题是否解决及是否引入新问题；仅评估当前版本文本。',
-    },
-  };
+  // The open verification gate always has priority over other planned work.
+  open.sort((a, b) => (a.kind === 'verify_storyboard' ? -1 : b.kind === 'verify_storyboard' ? 1 : 0));
+  for (const task of open) {
+    const blocked = blockedReason(task, tasks);
+    if (blocked) return { kind: 'blocked', task, reason: blocked };
+    const decision = decisionForTask(task, roles);
+    if (!decision)
+      return { kind: 'waiting', task, reason: '缺少具备所需能力的已启用岗位。' };
+    return { kind: 'ready', task, decision };
+  }
+  return { kind: 'idle' };
 }

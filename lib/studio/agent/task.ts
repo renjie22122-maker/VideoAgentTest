@@ -64,6 +64,90 @@ export const taskKindForAction: Record<AutoDecision['action'], AgentTaskKind> = 
   stop: 'stop',
 };
 
+/** Reverse mapping for the scheduler: a pending task of this kind runs which action. */
+export const actionForTaskKind: Partial<Record<AgentTaskKind, AutoDecision['action']>> = {
+  review: 'review',
+  revise_storyboard: 'revise_shots',
+  write_script: 'write_script',
+  design_assets: 'design_assets',
+  stop: 'stop',
+  verify_storyboard: 'review',
+};
+
+/**
+ * Task-first materialization: every decision becomes a pending task BEFORE it
+ * runs, and the executor reuses that exact task record. Proposal → task →
+ * scheduler → policy → executor → completed, one id end to end.
+ */
+export function materializeDecisionTask(
+  run: AutoRun,
+  p: Project,
+  decision: AutoDecision,
+  createdBy: 'user' | 'system',
+): AgentTask {
+  const list = (run.tasks ??= []);
+  const task: AgentTask = {
+    id: globalThis.crypto.randomUUID(),
+    kind: taskKindForAction[decision.action],
+    status: 'pending',
+    ownerRoleId: decision.roleId,
+    createdBy,
+    dependsOn: [],
+    targetShotIds: decision.targets ?? [],
+    reason: decision.reason,
+    inputVersions: {
+      revision: p.revision,
+      configRevision: p.production?.agentConfigRevision ?? 0,
+    },
+    attempts: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  list.push(task);
+  if (list.length > 200) list.splice(0, list.length - 200);
+  return task;
+}
+
+/**
+ * Materialize the supervisor's follow-up plan as a chained pending task
+ * sequence: each entry depends on the previous one, so the scheduler runs
+ * them in order without re-asking the LLM.
+ */
+export function materializePlanTasks(
+  run: AutoRun,
+  p: Project,
+  plan: NonNullable<AutoDecision['plan']>,
+  afterTaskId: string,
+): AgentTask[] {
+  const list = (run.tasks ??= []);
+  let previous = afterTaskId;
+  const created: AgentTask[] = [];
+  for (const entry of plan) {
+    const task: AgentTask = {
+      id: globalThis.crypto.randomUUID(),
+      kind: taskKindForAction[entry.action],
+      status: 'pending',
+      ownerRoleId: entry.roleId ?? '',
+      createdBy: 'system',
+      dependsOn: [previous],
+      targetShotIds: [],
+      reason: entry.reason,
+      inputVersions: {
+        revision: p.revision,
+        configRevision: p.production?.agentConfigRevision ?? 0,
+      },
+      attempts: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    list.push(task);
+    created.push(task);
+    previous = task.id;
+  }
+  if (list.length > 200) list.splice(0, list.length - 200);
+  return created;
+}
+
 /** The open verification gate for the current pendingReview, if any. */
 export function openVerificationTask(run: AutoRun): AgentTask | undefined {
   return run.tasks?.find(

@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import {
   autoStep,
@@ -128,7 +130,7 @@ void test('a blocked verification calls no worker even in live mode', async (t) 
     LLM_MODEL: process.env.LLM_MODEL,
   };
   Object.assign(process.env, {
-    STUDIO_DATA_DIR: 'scheduler-blocked-' + Date.now(),
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-blocked-' + Date.now()),
     LLM_BASE_URL: 'https://scheduler-blocked.invalid/v1',
     LLM_API_KEY: 'test',
     LLM_MODEL: 'test',
@@ -178,7 +180,7 @@ void test('a verifier without review capability is never executed through the sc
     LLM_MODEL: process.env.LLM_MODEL,
   };
   Object.assign(process.env, {
-    STUDIO_DATA_DIR: 'scheduler-verifier-' + Date.now(),
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-verifier-' + Date.now()),
     LLM_BASE_URL: 'https://scheduler-verifier.invalid/v1',
     LLM_API_KEY: 'test',
     LLM_MODEL: 'test',
@@ -211,6 +213,62 @@ void test('a verifier without review capability is never executed through the sc
   assert.equal(p.production!.autoRun!.pendingReview!.authorRoleId, 'storyboard');
 });
 
+void test('a supervisor follow-up plan runs through the scheduler without another planner call', async (t) => {
+  const p = project();
+  p.mode = 'live';
+  p.plan = demoPlan(p);
+  p.production!.script = demoScreenplay(p);
+  p.production!.scriptApproved = true;
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: false };
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-plan-' + Date.now()),
+    LLM_BASE_URL: 'https://scheduler-plan.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    const content = calls === 1
+      ? JSON.stringify({
+          roleId: 'reviewer',
+          action: 'review',
+          reason: '初审',
+          plan: [{ action: 'review', roleId: 'continuity', reason: '场记复审' }],
+        })
+      : JSON.stringify({ summary: '未见新增问题', findings: [] });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+  });
+  p.production!.autoRun = createAutoRun(p, '会审计划', 3);
+  await autoStep(p);
+  assert.equal(calls, 2, 'supervisor + first review');
+  const tasks = p.production!.autoRun!.tasks!;
+  const first = tasks.find((task) => task.kind === 'review' && task.ownerRoleId === 'reviewer')!;
+  const plan = tasks.find((task) => task.ownerRoleId === 'continuity')!;
+  assert.equal(first.status, 'completed');
+  assert.deepEqual(plan.dependsOn, [first.id]);
+  assert.equal(plan.status, 'pending');
+  // Step 2: the scheduler runs the planned task — zero additional supervisor calls.
+  await autoStep(p);
+  assert.equal(calls, 3, 'only the planned worker call');
+  const done = p.production!.autoRun!.tasks!.find((task) => task.id === plan.id)!;
+  assert.equal(done.status, 'completed');
+  assert.equal(done.result?.outcome, 'reviewed');
+  assert.equal(done.ownerRoleId, 'continuity');
+  assert.equal(p.production!.autoRun!.steps, 2);
+});
+
 void test('autoStep serves the scheduled verification task before any planner call', async (t) => {
   const p = project();
   p.mode = 'live';
@@ -226,7 +284,7 @@ void test('autoStep serves the scheduled verification task before any planner ca
     LLM_MODEL: process.env.LLM_MODEL,
   };
   Object.assign(process.env, {
-    STUDIO_DATA_DIR: 'scheduler-test-' + Date.now(),
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-test-' + Date.now()),
     LLM_BASE_URL: 'https://scheduler-test.invalid/v1',
     LLM_API_KEY: 'test',
     LLM_MODEL: 'test',

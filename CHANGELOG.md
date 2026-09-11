@@ -1,5 +1,22 @@
 # 更新记录
 
+## 2026-09-14 · 执行底座五件套：Task-first、Durable Runtime、Generation Queue、Artifact 版本与 Cost Ledger
+
+按评审排序完成基础设施阶段：不再新增抽象，让抽象承担生产负载。
+
+### 新增
+
+- **Task-first 全量迁移**：每个决策在执行前物化为 pending 任务，执行器复用同一任务记录走完 proposal → task → scheduler → policy → executor → completed；决策可携带 `capability / targets / plan`（最多 3 项后续任务），计划物化为带依赖链的任务序列由 Scheduler 顺序执行，不再重复询问 LLM；Scheduler 通用化——任意 pending 任务按依赖就绪后路由到授权岗位执行。
+- **SQLite Durable Runtime**（`lib/studio/durable/ledger.ts`）：runs / tasks / generation_jobs / usage_records 四表持久化执行状态，Node ≥ 23.4 用内建 `node:sqlite`，旧运行时自动降级为等价语义的 JSONL 追加日志；所有写入经 `safely()` 包裹，账本故障不阻断命令。
+- **Generation Queue 升级**：`Job.submission`（unsent / submitted / unknown）成为持久化提交边界，`leaseExpiresAt` 租约标记本地工作者所有权；进程重启后——未发送的工作安全重排、结果未知的提交**永不重发**、已提交的按账本恢复的 provider job id 继续查询。`fal-pending` 标记可被账本中的真实 ID 接管恢复。
+- **Artifact 版本化**：节点携带 `version / producedAt`（资产版本、提示词编译 revision、视频来自 job、QA attempt），`artifactManifest` 以 producedAt 与最近失效事件比较判定 current/stale，失效后重新生成的产物正确标为 current。
+- **Cost Ledger**：`durable/pricing.ts` 文档化估算（LLM 按 tokens、视频按秒、图像按张，环境变量可覆盖）；LLM 调用与媒体提交双入口记录，projects.json 保留有界镜像（`production.costLedger`），Observation 注入 `costSummary`（分类花费、预算上限）供 cost-aware 规划。
+
+### 文档与验证
+
+- 新增 durable-runtime、cost-ledger 两组回归（跨进程提交边界、崩溃恢复、租约重占、估算与镜像）；54 个测试文件、类型检查、代码规范与生产构建全部通过。
+- 架构文档与 README 更新存储与队列边界说明。
+
 ## 2026-09-13 · 执行链封口：统一 Policy 门、调度放行权与状态语义修正
 
 按第四轮评审修复两个执行链旁路与三个边界问题。核心原则：权限、依赖与版本状态必须在**所有执行路径**上成立，而不是只在单点成立。

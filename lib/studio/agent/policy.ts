@@ -3,7 +3,7 @@ import { autoActions } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import { getAgentAction } from './actions/registry.ts';
 import type { CapabilityRequirement } from './actions/types.ts';
-import { grantedCapabilities, satisfiesCapabilityRequirement } from './capabilities.ts';
+import { grantedCapabilities, satisfiesCapabilityRequirement, capabilityLabels } from './capabilities.ts';
 import type { CapabilityId } from './capabilities.ts';
 import type { AutoDecision } from './planner.ts';
 
@@ -51,6 +51,37 @@ export function evaluateAutoDecision(
       code: 'invalid_decision',
       message: '总 Agent 返回了不允许的动作或无效理由。',
     });
+  // Optional task-first fields: capability / targets / follow-up plan.
+  const capabilityValid =
+    raw.capability === undefined ||
+    (typeof raw.capability === 'string' && raw.capability in capabilityLabels);
+  const targetsValid =
+    raw.targets === undefined ||
+    (Array.isArray(raw.targets) &&
+      raw.targets.length <= 20 &&
+      raw.targets.every((t) => typeof t === 'string' && t.trim()) &&
+      new Set(raw.targets).size === raw.targets.length);
+  const planValid =
+    raw.plan === undefined ||
+    (Array.isArray(raw.plan) &&
+      raw.plan.length <= 3 &&
+      raw.plan.every(
+        (entry) =>
+          entry &&
+          typeof entry === 'object' &&
+          !Array.isArray(entry) &&
+          autoActions.includes((entry as Record<string, unknown>).action as AutoDecision['action']) &&
+          typeof (entry as Record<string, unknown>).reason === 'string' &&
+          !!((entry as Record<string, unknown>).reason as string).trim() &&
+          ((entry as Record<string, unknown>).reason as string).length <= 1500 &&
+          ((entry as Record<string, unknown>).roleId === undefined ||
+            typeof (entry as Record<string, unknown>).roleId === 'string'),
+      ));
+  if (!capabilityValid || !targetsValid || !planValid)
+    violations.push({
+      code: 'invalid_task_fields',
+      message: '总 Agent 返回了无效的能力标识、镜头目标或后续计划。',
+    });
   if (actionValid && actionId !== 'stop' && !roles.some((r) => r.id === raw.roleId))
     violations.push({ code: 'role_disabled', message: '总 Agent 选择了未启用岗位。' });
   const action = actionValid ? getAgentAction(actionId as AutoDecision['action']) : undefined;
@@ -80,6 +111,19 @@ export function evaluateAutoDecision(
     roleId,
     action: actionId as AutoDecision['action'],
     reason: typeof raw.reason === 'string' ? raw.reason : '',
+    ...(capabilityValid && typeof raw.capability === 'string'
+      ? { capability: raw.capability }
+      : {}),
+    ...(targetsValid && Array.isArray(raw.targets) ? { targets: raw.targets as string[] } : {}),
+    ...(planValid && Array.isArray(raw.plan)
+      ? {
+          plan: (raw.plan as Record<string, unknown>[]).map((entry) => ({
+            action: entry.action as AutoDecision['action'],
+            reason: entry.reason as string,
+            ...(typeof entry.roleId === 'string' ? { roleId: entry.roleId } : {}),
+          })),
+        }
+      : {}),
   };
   return {
     decision,

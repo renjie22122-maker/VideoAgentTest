@@ -58,7 +58,15 @@ beginStep/finish   RunController       步骤记账、指纹去重、预算耗�
 
 ## 失效血缘与 Artifact 图
 
-生产 FSM（graph.ts）、任务图（agent/task.ts）与产物依赖图（artifact-graph.ts）是三个独立模型。`buildArtifactGraph` 从作品推导 script → shot → prompt → video → qa 与资产引用，`downstreamClosure` 给出变更的传递下游，`artifactManifest` 据此输出每个存续产物的 current / stale / archived 状态。`invalidateFrom` 与 `invalidateAssetMedia` 在原有清理之外追加 `production.artifactEvents` 血缘记录（只增、有界），回答“为什么这份素材被重新生成”。旧产物用 stale / archived 语义表达（资产 `retired`、任务 `cancelled`），不物理删除历史。
+生产 FSM（graph.ts）、任务图（agent/task.ts）与产物依赖图（artifact-graph.ts）是三个独立模型。`buildArtifactGraph` 从作品推导 script → shot → prompt → video → qa 与资产引用，节点携带可得的版本身份（资产 version、提示词编译 revision、视频来自 job、QA attempt）与 producedAt；`downstreamClosure` 给出变更的传递下游，`artifactManifest` 据此输出每个存续产物的 current / stale / archived 状态——**判定以产物自身的生产时间与失效事件比较为准**，失效后重新生成的产物为 current。`invalidateFrom` 与 `invalidateAssetMedia` 在原有清理之外追加 `production.artifactEvents` 血缘记录（只增、有界），回答“为什么这份素材被重新生成”。旧产物用 stale / archived 语义表达（资产 `retired`、任务 `cancelled`），不物理删除历史。
+
+## 持久化执行账本与生成队列
+
+创作状态仍由 `projects.json` 原子文件承载；**执行状态**由 `lib/studio/durable/ledger.ts` 持久化（runs / tasks / generation_jobs / usage_records），Node ≥ 23.4 用内建 node:sqlite，旧运行时自动降级为等价 JSONL。关键语义：
+
+- 任务/运行在 beginStep / finishStep 同步写入，账本故障不阻断命令（`safely()`）。
+- 生成任务的 `submission`（unsent / submitted / unknown）是持久化提交边界：**结果未知的付费提交永不重发**；本地崩溃后，未发送的工作按租约（`leaseExpiresAt`）重排，已提交的按账本中的 provider job id 继续查询；`fal-pending` 标记可被账本真实 ID 接管。
+- 成本台账：LLM 与媒体提交双入口按文档化估算记录，projects.json 保留有界镜像，Observation 注入 `costSummary` 供预算感知规划。估算不是发票，真实费率可用环境变量配置。
 
 ## 扩展语言服务
 

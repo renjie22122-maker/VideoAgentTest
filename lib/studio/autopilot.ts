@@ -6,7 +6,7 @@ import { planDecision } from './agent/planner.ts';
 import type { AutoDecision, PlanOutcome } from './agent/planner.ts';
 import { evaluateAutoDecision } from './agent/policy.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
-import { syncVerificationTask } from './agent/task.ts';
+import { syncVerificationTask, materializeDecisionTask, materializePlanTasks } from './agent/task.ts';
 import type { AgentTask } from './agent/task.ts';
 import { getAgentAction, registeredAgentActions, describeAllowedActions } from './agent/actions/registry.ts';
 import { nextScheduledTask } from './agent/scheduler.ts';
@@ -23,7 +23,7 @@ export type { PolicyVerdict, PolicyViolation } from './agent/policy.ts';
 export { buildObservation, unresolvedFindings } from './agent/observation.ts';
 export { getAgentAction, registeredAgentActions, agentActions, describeAllowedActions } from './agent/actions/registry.ts';
 export { beginStep, finishStep } from './agent/run-controller.ts';
-export { syncVerificationTask, openVerificationTask, taskKindForAction } from './agent/task.ts';
+export { syncVerificationTask, openVerificationTask, taskKindForAction, actionForTaskKind, materializeDecisionTask, materializePlanTasks } from './agent/task.ts';
 export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from './agent/task.ts';
 export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities, satisfiesCapabilityRequirement } from './agent/capabilities.ts';
 export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
@@ -109,8 +109,11 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   // is the one authoritative check shared by every path.
   const { policy } = evaluateAutoDecision(decision, p);
   if (!policy.allowed) throw new Error(policy.violations[0].message);
+  // Task-first: the decision becomes a pending task BEFORE it runs, and the
+  // executor reuses that exact record — one task id from proposal to result.
+  const stepTask = scheduledTask ?? materializeDecisionTask(run, p, decision, assigned ? 'user' : 'system');
   const role = observation.roles.find((r) => r.id === decision.roleId);
-  const step = beginStep(run, p, decision, role, assigned ? 'user' : 'system', scheduledTask);
+  const step = beginStep(run, p, decision, role, assigned ? 'user' : 'system', stepTask);
   if (!step.repeat) {
     const action = getAgentAction(decision.action);
     try {
@@ -135,6 +138,11 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     }
   }
   finishStep(run, p, step.entry, step.taskId);
+  // The supervisor's follow-up plan becomes a chained pending task sequence;
+  // the scheduler owns it from here — no further LLM call needed.
+  if (!step.repeat && decision.plan?.length) {
+    materializePlanTasks(run, p, decision.plan, step.taskId);
+  }
 }
 
 export function continuityFixDecision(p: Project): AutoDecision {

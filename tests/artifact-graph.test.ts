@@ -152,6 +152,30 @@ void test('the artifact manifest marks surviving downstream artifacts stale with
   assert.equal(byKey.get('asset:asset-old'), 'archived');
 });
 
+void test('artifact nodes carry version identity where evidence exists', () => {
+  const p = project();
+  p.production!.prompts![0].revision = 7;
+  p.jobs.push({
+    id: 'job-v1',
+    shotId: 'shot-1',
+    kind: 'video',
+    status: 'succeeded',
+    mode: 'demo',
+    revision: 1,
+    createdAt: 10,
+    finishedAt: 2000,
+  });
+  const graph = buildArtifactGraph(p);
+  const node = (kind: string, id: string) =>
+    graph.nodes.find((n) => n.ref.kind === kind && n.ref.id === id)!;
+  assert.equal(node('asset', 'asset-renata').version, 1);
+  assert.equal(node('prompt', 'shot-1').version, 7);
+  const video = node('video', 'shot-1');
+  assert.equal(video.version, 1);
+  assert.equal(video.producedAt, 2000, 'video producedAt comes from the succeeded job');
+  assert.equal(node('qa', 'shot-1').version, 1);
+});
+
 void test('a video regenerated after the affecting event is current, not stale', () => {
   const p = project();
   const eventAt = 1000;

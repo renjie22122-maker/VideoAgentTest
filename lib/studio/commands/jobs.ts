@@ -10,12 +10,42 @@ import {
   currentVideoProfile,
 } from '../providers.ts';
 import { newJob } from './shared.ts';
+import { safely } from '../durable/ledger.ts';
 import type { Project, Job } from '../types.ts';
+
+/** A local worker owns a running job for at most this long; longer means it died. */
+export const GENERATION_LEASE_MS = 5 * 60 * 1000;
+
+function persistJob(p: Project, job: Job) {
+  safely((ledger) =>
+    ledger.upsertGenerationJob({
+      jobId: job.id,
+      projectId: p.id,
+      shotId: job.shotId,
+      kind: job.kind,
+      status: job.status,
+      submission: job.submission?.state ?? 'unsent',
+      providerJobId: job.submission?.providerJobId ?? '',
+      leaseExpiresAt: job.leaseExpiresAt ?? 0,
+      attempt: job.retries ?? 0,
+      createdAt: job.createdAt,
+      updatedAt: Date.now(),
+    }),
+  );
+}
+
+/** The durable submission boundary: a marker persisted before the HTTP call. */
+function markSubmissionUnknown(job: Job): string {
+  job.submission = { state: 'unknown' };
+  return 'fal-pending';
+}
 
 /**
  * Sequential media queue. Downstream requests receive the previous output.
  * Submissions persist the idempotency key first; resubmission after a crash
- * reuses the same key instead of double-paying.
+ * reuses the same key instead of double-paying. The durable ledger records
+ * every transition, so a restarted process can tell "not yet submitted" from
+ * "submitted but result unknown" — and never re-submits the latter.
  */
 export async function tick(p: Project, persist: () => Promise<void>) {
   const job = p.jobs.find((j) => j.status === 'running') || p.jobs.find((j) => j.status === 'queued');
@@ -23,6 +53,23 @@ export async function tick(p: Project, persist: () => Promise<void>) {
   const index = p.plan.shots.findIndex((s) => s.id === job.shotId);
   const shot = p.plan.shots[index];
   const previous = referencePredecessor(p.plan.shots, index);
+  // Lease recovery: a running job whose lease expired belonged to a dead local
+  // worker. Unsent work may restart; unknown submissions must not re-submit.
+  if (job.status === 'running' && job.leaseExpiresAt && Date.now() > job.leaseExpiresAt) {
+    if (job.submission?.state === 'unsent') {
+      job.status = 'queued';
+      job.leaseExpiresAt = undefined;
+      persistJob(p, job);
+      return;
+    }
+    if (job.submission?.state === 'unknown') {
+      job.status = 'failed';
+      job.error = '本地进程中断时提交结果未知，已阻止重复提交。请核查供应商记录。';
+      persistJob(p, job);
+      return;
+    }
+    // Submitted work: fall through and resume polling with the known provider id.
+  }
   if (
     previous &&
     !job.independent &&
@@ -40,6 +87,7 @@ export async function tick(p: Project, persist: () => Promise<void>) {
     if (!ready) {
       job.status = 'failed';
       job.error = '上一镜头尚未成功，请先重试上游任务。';
+      persistJob(p, job);
       return;
     }
   }
@@ -51,12 +99,16 @@ export async function tick(p: Project, persist: () => Promise<void>) {
       (job.longTake || shot.duration > (currentVideoProfile().maxSeconds ?? Infinity))
     ) {
       await tickLongTake(p, job, persist);
+      persistJob(p, job);
       return;
     }
     if (job.status === 'queued') {
       job.status = 'running';
       job.startedAt = Date.now();
+      job.leaseExpiresAt = Date.now() + GENERATION_LEASE_MS;
+      job.submission = { state: 'unsent' };
       job.input = mediaInput(p, job);
+      persistJob(p, job);
       await persist();
       if (job.mode === 'live' && !job.remoteId) {
         if (job.kind === 'video' && !job.group) {
@@ -65,7 +117,8 @@ export async function tick(p: Project, persist: () => Promise<void>) {
         }
         job.remoteId = await submitMedia(p, job, async () => {
           const previousId = job.remoteId;
-          job.remoteId = 'fal-pending';
+          job.remoteId = markSubmissionUnknown(job);
+          persistJob(p, job);
           try {
             await persist();
           } catch (e) {
@@ -73,6 +126,8 @@ export async function tick(p: Project, persist: () => Promise<void>) {
             throw e;
           }
         });
+        job.submission = { state: 'submitted', providerJobId: job.remoteId };
+        persistJob(p, job);
         await persist();
       }
       return;
@@ -80,17 +135,20 @@ export async function tick(p: Project, persist: () => Promise<void>) {
     if (Date.now() - (job.startedAt || 0) > 30 * 60 * 1000) {
       job.status = 'failed';
       job.error = '生成超过 30 分钟，请在供应商端核查任务。';
+      persistJob(p, job);
       return;
     }
     if (job.group && job.mode === 'demo') {
       job.status = 'succeeded';
       job.finishedAt = Date.now();
+      persistJob(p, job);
       return;
     }
     if (job.mode === 'demo') {
       if (Date.now() - (job.startedAt || 0) < 900) return;
       job.status = 'succeeded';
       job.finishedAt = Date.now();
+      persistJob(p, job);
       if (job.kind === 'image') shot.referenceMode = 'demo';
       else if (await reflect(p, job)) shot.videoMode = 'demo';
       return;
@@ -98,17 +156,33 @@ export async function tick(p: Project, persist: () => Promise<void>) {
     // Persist the idempotency key before submission; resubmission after a crash uses the same key.
     if (!job.remoteId) {
       job.remoteId = await submitMedia(p, job);
+      job.submission = { state: 'submitted', providerJobId: job.remoteId };
+      persistJob(p, job);
       return;
     }
-    if (job.remoteId === 'fal-pending')
-      throw new Error('上次供应商提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
+    if (job.remoteId === 'fal-pending') {
+      // Crash recovery: if the ledger knows the provider id for this job, adopt
+      // it and resume polling; otherwise the submission outcome stays unknown.
+      const row = safely((ledger) => ledger.generationJob(job.id));
+      if (row && row.submission === 'submitted' && row.providerJobId) {
+        job.remoteId = row.providerJobId;
+        job.submission = { state: 'submitted', providerJobId: row.providerJobId };
+        persistJob(p, job);
+      } else {
+        throw new Error('上次供应商提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
+      }
+    }
     const result = await pollMedia(job);
     job.status = result.status;
     job.error = result.error;
     if (result.status === 'succeeded') {
       job.outputUrl = result.outputUrl;
       job.finishedAt = Date.now();
-      if (job.group) return;
+      job.leaseExpiresAt = undefined;
+      if (job.group) {
+        persistJob(p, job);
+        return;
+      }
       if (job.kind === 'image') {
         shot.referenceUrl = result.outputUrl;
         shot.referenceMode = 'live';
@@ -118,9 +192,11 @@ export async function tick(p: Project, persist: () => Promise<void>) {
         shot.videoMode = 'live';
       }
     }
+    persistJob(p, job);
   } catch (e) {
     job.status = 'failed';
     job.error = e instanceof Error ? e.message : '生成失败';
+    persistJob(p, job);
   }
 }
 

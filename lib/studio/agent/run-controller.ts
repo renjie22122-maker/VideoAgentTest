@@ -6,6 +6,40 @@ import type { AutoDecision } from './planner.ts';
 import { taskKindForAction, syncVerificationTask } from './task.ts';
 import type { AgentTask } from './task.ts';
 import { capabilityForDecision } from './capabilities.ts';
+import { safely } from '../durable/ledger.ts';
+
+function persistRun(run: AutoRun, p: Project) {
+  safely((ledger) =>
+    ledger.upsertAgentRun({
+      runId: run.id ?? '',
+      projectId: p.id,
+      status: run.status,
+      steps: run.steps,
+      maxSteps: run.maxSteps,
+      instruction: run.instruction,
+      summary: run.summary ?? '',
+      updatedAt: Date.now(),
+    }),
+  );
+}
+
+function persistTask(task: AgentTask, run: AutoRun, p: Project, outcome = '') {
+  safely((ledger) =>
+    ledger.upsertAgentTask({
+      taskId: task.id,
+      runId: run.id ?? '',
+      projectId: p.id,
+      kind: task.kind,
+      status: task.status,
+      ownerRoleId: task.ownerRoleId,
+      capability: task.capability ?? '',
+      dependsOn: task.dependsOn.join(','),
+      inputRevision: task.inputVersions.revision,
+      outcome,
+      updatedAt: task.updatedAt,
+    }),
+  );
+}
 
 export function noProgress(run: AutoRun, message: string) {
   run.status = 'stopped';
@@ -85,6 +119,8 @@ export function beginStep(
   } else {
     task = recordTask(run, p, decision, role, createdBy);
   }
+  persistRun(run, p);
+  persistTask(task, run, p);
   run.steps++;
   const repeat =
     decision.action !== 'stop' &&
@@ -118,6 +154,8 @@ export function finishStep(run: AutoRun, p: Project, entry: AutoLogEntry, taskId
     };
     task.updatedAt = Date.now();
   }
+  if (task) persistTask(task, run, p, task.result?.outcome ?? '');
+  persistRun(run, p);
   // A step may have set pendingReview (storyboard revision): mirror it into an
   // open verification task within the same step so the gate is visible now.
   syncVerificationTask(run, p);

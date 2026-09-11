@@ -66,6 +66,25 @@ export function buildObservation(p: Project, run: AutoRun) {
     history: run.log,
     qualityReport: buildQualityReport(p),
     unresolvedTextFindings: unresolvedFindings(p),
+    // Budget view for cost-aware planning (documented estimates, not invoices).
+    costSummary: costSummary(p),
+  };
+}
+
+export function costSummary(p: Project) {
+  const entries = p.production?.costLedger ?? [];
+  const byCategory = { llm: 0, image: 0, video: 0 } as Record<string, number>;
+  for (const entry of entries) byCategory[entry.category] += entry.estimatedCost;
+  const round = (value: number) => Math.round(value * 100) / 100;
+  return {
+    currency: 'USD',
+    spentEstimated: round(entries.reduce((sum, e) => sum + e.estimatedCost, 0)),
+    byCategory: {
+      llm: round(byCategory.llm),
+      image: round(byCategory.image),
+      video: round(byCategory.video),
+    },
+    budgetUsd: process.env.PROJECT_BUDGET_USD ? Number(process.env.PROJECT_BUDGET_USD) : undefined,
   };
 }
 

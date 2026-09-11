@@ -3,6 +3,8 @@ import { languagePreset, languageProtocols, detectLanguagePreset, isLocalLanguag
 import { fetchJSON } from './http.ts';
 import { networkError } from './network.ts';
 import { LLM_TIMEOUT_MS } from './timeouts.ts';
+import { estimateLLMCost } from './durable/pricing.ts';
+import { safely } from './durable/ledger.ts';
 
 export type LanguageMessage={role:'system'|'user'|'assistant';content:string};
 export type LanguageConfig={provider:string;protocol:LanguageProtocol;baseUrl:string;model:string;apiKey:string;jsonMode:'auto'|'prompt';maxTokens?:number;workspaceId?:string};
@@ -90,6 +92,17 @@ export function languageResponseText(raw:unknown,protocol:LanguageProtocol):stri
 export async function languageText(messages:readonly LanguageMessage[],options:{model?:string}={}):Promise<string>{
   const config=languageConfig();if(options.model)config.model=options.model;
   const wire=buildLanguageRequest(messages,config);
+  // Cost ledger: blended estimate from prompt length (documented estimate).
+  safely((ledger)=>ledger.recordUsage({
+    id: globalThis.crypto.randomUUID(),
+    projectId: '',
+    category: 'llm',
+    provider: config.provider,
+    model: config.model,
+    estimatedCost: estimateLLMCost(config.model, Math.ceil(JSON.stringify(messages).length / 3.5)),
+    jobId: '',
+    createdAt: Date.now(),
+  }));
   let result:{response:Response;data:unknown};
   try{result=await fetchJSON(wire.url,{method:'POST',headers:wire.headers,body:JSON.stringify(wire.body),redirect:'error'},LLM_TIMEOUT_MS);}
   catch(error){if(error instanceof SyntaxError)throw new LanguageProviderError('format','语言服务返回的响应不是完整 JSON，请核对接口地址及供应商记录。');throw new LanguageProviderError('network',networkError(error,wire.url.hostname).message);}

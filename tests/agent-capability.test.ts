@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import {
   autoStep,
@@ -115,7 +117,7 @@ void test('task records carry the derived capability and the verification task i
     LLM_MODEL: process.env.LLM_MODEL,
   };
   Object.assign(process.env, {
-    STUDIO_DATA_DIR: 'capability-test-' + Date.now(),
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'capability-test-' + Date.now()),
     LLM_BASE_URL: 'https://capability-test.invalid/v1',
     LLM_API_KEY: 'test',
     LLM_MODEL: 'test',
