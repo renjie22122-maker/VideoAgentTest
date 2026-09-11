@@ -66,6 +66,34 @@
 
 只有 `passed` 与 `rejected` 合法，意见必须非空。网络错误不视为通过。拒绝会先阻止下游提交，将审查意见写入 `reflection` 后重新生成，最多 2 次自动返工。达到上限后要求编辑新版本。自动通过仍进入人工审片，不自动宣称成片符合艺术目标。
 
+## 帧级视觉审查（工作台抽帧模式）
+
+当本地 FFmpeg 可用且 `VISUAL_QA_SAMPLE_FRAMES` 未设为 `0`，工作台会先从生成视频中抽取等间隔帧（默认 3 帧，480px），再以同一 `POST /review` 端点发送 `frames` 字段（`videoUrl` 省略）：
+
+```json
+{
+  "frames": [
+    {"timestampSec": 1.0, "dataUrl": "data:image/png;base64,..."},
+    {"timestampSec": 2.0, "dataUrl": "data:image/png;base64,..."}
+  ],
+  "shot": {},
+  "bible": {},
+  "previousShot": {},
+  "criteria": ["identity","wardrobe","limbs","action_match","camera_motion","temporal_continuity"],
+  "idempotencyKey": "job-uuid-qa-frames"
+}
+```
+
+此时网关可返回结构化 findings（最多 10 项），每项必须带帧时间戳：
+
+```json
+{"verdict":"rejected","notes":"角色发色漂移。","findings":[
+  {"code":"identity-change","severity":"error","timestamp":1.0,"evidence":"第 2 帧发色","suggestion":"保持发色与美术参考一致，重新生成本镜。"}
+]}
+```
+
+findings 会存入该镜 QA 记录，并在返工请求中随 `reflectionFindings` 传回生成端，作为精确修复依据。**没有帧证据的文字意见不能成为视觉缺陷**——解析器强制 code/severity/帧时间戳/建议四要素。抽帧失败时自动回退到 `videoUrl` 合同，不影响既有网关。
+
 ## 供应商适配责任
 
 - 云端：认证、具体模型名与合法片长/画幅、任务状态映射、图像 URL 或上传格式。

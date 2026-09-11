@@ -26,6 +26,8 @@ import { WRITER_GUIDE, demoScreenplay, validateScreenplay, ScreenplayTimingError
 import { skillGuide, productionSkills } from './skills.ts';
 import { estimateVideoCost, estimateImageCost } from './durable/pricing.ts';
 import { safely } from './durable/ledger.ts';
+import { buildVisualReviewRequest, parseVisualFindings } from './visual-qa.ts';
+import type { SampledFrame, VisualFinding } from './visual-qa.ts';
 
 export async function roleJSON(role:string,instruction:string,input:unknown,options:{model?:string}={}):Promise<Record<string,unknown>>{
   const projectId =
@@ -97,7 +99,7 @@ export function mediaInput(p:Project,j:Job):unknown {
   const basePrompt=p.production?.prompts?.find(v=>v.shotId===s.id)?.prompt??shotPrompt(p,i);
   const fallback=assetFallbackDesigns(p,[s.id]);const effectivePrompt=basePrompt+(fallback.length?'\n未附图资产的文字设定：'+JSON.stringify(fallback):'');
   const prompt=j.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'?'生成单一电影镜头画面，不要拼贴。严格保留参考图人物外观、服装和场景结构。若参考图为多面板设定板，只提取主体区基准三视图的造型与空间，不复制版面、头部表情组或细节栏，不采用探索发型与服装。参考顺序：'+JSON.stringify(selection.selected.map(({name,kind,version})=>({name,kind,version})))+'。\n'+effectivePrompt:effectivePrompt;
-  return {motionPlan:motionGuidance(s),kind:j.kind,model:j.kind==='image'?capabilities().imageModel:setting('VIDEO_MODEL'),idempotencyKey:j.id,prompt,assetReadiness:assetRequirementManifest(p,[j.shotId]),executionPolicy:{version:productionSkills.executor.version,instructions:skillGuide('executor',p)},reflection:p.production?.qa.find(q=>q.shotId===s.id)?.notes??null,seed:p.production?.assets?.seed,duration:s.duration,aspectRatio:p.ratio,referenceSelectionOmitted:j.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'?selection.omitted:[],referenceImages:j.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'?selection.selected.map(e=>e.url):[...assetReferences(p,j.shotId),s.referenceUrl,referencePredecessor(p.plan!.shots,i)?.referenceUrl].filter(Boolean),continuity:{previousVideoUrl:referencePredecessor(p.plan!.shots,i)?.videoUrl,requestPreviousLastFrame:!!referencePredecessor(p.plan!.shots,i),camera:s.camera}};
+  return {motionPlan:motionGuidance(s),kind:j.kind,model:j.kind==='image'?capabilities().imageModel:setting('VIDEO_MODEL'),idempotencyKey:j.id,prompt,assetReadiness:assetRequirementManifest(p,[j.shotId]),executionPolicy:{version:productionSkills.executor.version,instructions:skillGuide('executor',p)},reflection:p.production?.qa.find(q=>q.shotId===s.id)?.notes??null,reflectionFindings:p.production?.qa.find(q=>q.shotId===s.id)?.findings??[],seed:p.production?.assets?.seed,duration:s.duration,aspectRatio:p.ratio,referenceSelectionOmitted:j.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'?selection.omitted:[],referenceImages:j.kind==='image'&&setting('IMAGE_PROVIDER')==='fal'?selection.selected.map(e=>e.url):[...assetReferences(p,j.shotId),s.referenceUrl,referencePredecessor(p.plan!.shots,i)?.referenceUrl].filter(Boolean),continuity:{previousVideoUrl:referencePredecessor(p.plan!.shots,i)?.videoUrl,requestPreviousLastFrame:!!referencePredecessor(p.plan!.shots,i),camera:s.camera}};
 }
 export async function submitMedia(p:Project,j:Job,beforeSubmit?:()=>Promise<void>):Promise<string> {
   requireReadyAssets(p,j.group?.shots.map(s=>s.id)??[j.shotId]);
@@ -167,6 +169,21 @@ export async function reviewMedia(p:Project,j:Job):Promise<{verdict:'passed'|'re
   const result=await request(setting('QA_GATEWAY_URL').replace(/\/$/,'')+'/review',{instructions:skillGuide('reviewer',p),skillVersion:productionSkills.reviewer.version,videoUrl:j.outputUrl,shot:p.plan!.shots.find(s=>s.id===j.shotId),bible:p.plan!.bible,previousShot:previousNarrativeShot(p.plan!.shots,p.plan!.shots.findIndex(s=>s.id===j.shotId))??null,criteria:['identity','wardrobe','limbs','action_match','camera_motion','temporal_continuity'],idempotencyKey:j.id+'-qa'},setting('QA_API_KEY'));
   if(result.verdict!=='passed'&&result.verdict!=='rejected')throw new Error('视觉审查网关返回结论无效。');
   return {verdict:result.verdict as 'passed'|'rejected',notes:text(result.notes,'审查意见',2000),source:'vision'};
+}
+
+/**
+ * Frame-based visual review: the gateway receives sampled frames (data URLs)
+ * and returns structured, timestamped findings. A text-only claim can never
+ * become a visual defect here — the parser enforces frame evidence.
+ */
+export async function reviewMediaFrames(p: Project, j: Job, frames: SampledFrame[]): Promise<{verdict:'passed'|'rejected';notes:string;source:'vision';findings:VisualFinding[]}|null>{
+  if(j.kind!=='video')return null;
+  if(!setting('QA_GATEWAY_URL')||!setting('QA_API_KEY'))return null;
+  const requestBody = buildVisualReviewRequest(p, j, frames);
+  const result=await request(setting('QA_GATEWAY_URL').replace(/\/$/,'')+'/review',requestBody,setting('QA_API_KEY'));
+  if(result.verdict!=='passed'&&result.verdict!=='rejected')throw new Error('视觉审查网关返回结论无效。');
+  const findings=parseVisualFindings(result.findings??[],p.plan!.shots.find(s=>s.id===j.shotId)?.duration??0);
+  return {verdict:result.verdict as 'passed'|'rejected',notes:text(result.notes,'审查意见',2000),source:'vision',findings};
 }
 
 function records(value:unknown,max=24):Record<string,unknown>[]{if(!Array.isArray(value)||value.length>max||value.some(v=>!v||typeof v!=='object'||Array.isArray(v)))throw new Error('专业节点输出格式不合格。');return value as Record<string,unknown>[];}

@@ -1,14 +1,20 @@
 import { referencePredecessor } from '../narrative.ts';
 import { tickLongTake } from '../take-runner.ts';
 import { transition } from '../graph.ts';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   mediaInput,
   submitMedia,
   pollMedia,
   reviewMedia,
+  reviewMediaFrames,
   videoPreview,
   currentVideoProfile,
 } from '../providers.ts';
+import { setting } from '../settings.ts';
+import { sampleVideoFrames } from '../visual-qa.ts';
 import { newJob } from './shared.ts';
 import { safely } from '../durable/ledger.ts';
 import type { Project, Job } from '../types.ts';
@@ -255,8 +261,35 @@ export async function tick(p: Project, persist: () => Promise<void>) {
   }
 }
 
-async function reflect(p: Project, j: Job): Promise<boolean> {
-  const review = await reviewMedia(p, j);
+/**
+ * Review a finished video: frame sampling when enabled and possible, with a
+ * graceful fallback to the video-URL contract. Findings are structured and
+ * timestamped — a text opinion without frame evidence is never a visual fact.
+ */
+export async function reviewForJob(
+  p: Project,
+  j: Job,
+): Promise<
+  | { verdict: 'passed' | 'rejected'; notes: string; source: 'demo' | 'vision'; findings?: import('../visual-qa.ts').VisualFinding[] }
+  | null
+> {
+  if (j.kind !== 'video') return null;
+  if (j.mode === 'demo' || !setting('QA_GATEWAY_URL') || !setting('QA_API_KEY'))
+    return reviewMedia(p, j);
+  if (process.env.VISUAL_QA_SAMPLE_FRAMES === '0' || !j.outputUrl)
+    return reviewMedia(p, j);
+  try {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vqa-'));
+    const frames = await sampleVideoFrames(j.outputUrl, dir, 3);
+    return await reviewMediaFrames(p, j, frames);
+  } catch {
+    // Frame sampling is best-effort: fall back to the URL contract.
+    return reviewMedia(p, j);
+  }
+}
+
+export async function reflect(p: Project, j: Job): Promise<boolean> {
+  const review = await reviewForJob(p, j);
   const g = p.production!;
   if (!review) {
     const previous = g.qa.find((q) => q.shotId === j.shotId);
@@ -275,6 +308,17 @@ async function reflect(p: Project, j: Job): Promise<boolean> {
     notes: review.notes,
     attempt,
     at: Date.now(),
+    ...(review.findings?.length
+      ? {
+          findings: review.findings.map((f) => ({
+            code: f.code,
+            severity: f.severity,
+            timestamp: f.timestamp,
+            evidence: f.evidence,
+            suggestion: f.suggestion,
+          })),
+        }
+      : {}),
   });
   transition(p, 'qa', '自动审查：' + review.notes);
   transition(p, 'generation', review.verdict === 'passed' ? '审查通过，继续生成。' : '审查退回，检查重试预算。');

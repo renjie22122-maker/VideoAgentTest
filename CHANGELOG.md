@@ -1,5 +1,21 @@
 # 更新记录
 
+## 2026-09-15 · Visual QA 闭环：帧采样 → 结构化 finding → 再生决策
+
+补上评审标注的最后一项新能力：真实视觉质检闭环。依赖方明确——视觉判定需要真实多模态评测服务；本版本交付的是**工作台侧的完整闭环管线**与严格合同。
+
+### 新增
+
+- **帧采样**（`lib/studio/visual-qa.ts`）：FFmpeg 探测时长后抽取等间隔帧（默认 3 帧、480px），封装为 data URL；抽帧失败自动回退到 `videoUrl` 合同，不影响既有网关。
+- **多模态审查合同**：`POST /review` 新增 `frames` 字段（含 timestampSec/dataUrl）；`reviewMediaFrames` 发送帧请求并按严格解析器校验结构化 findings（≤10 项，强制 code/severity/**帧时间戳**/建议四要素）——**没有帧证据的文字意见不能成为视觉缺陷**。
+- **结构化 finding 贯通**：findings 存入该镜 QA 记录（`qa.findings`），返工请求经 `reflectionFindings` 传回生成端作为精确修复依据；`reviewForJob` 在采样模式与 URL 模式间优雅选择（`VISUAL_QA_SAMPLE_FRAMES=0` 关闭）。
+- **闭环评测**（`scripts/visual-qa-eval.mjs`）：真实 FFmpeg 抽帧 + 本地 mock 视觉网关驱动完整回路——拒绝（带时间戳 finding）→ 再生决策（retryBudget 计 1）→ 复核通过，度量输出。
+
+### 文档与验证
+
+- 新增 visual-qa 测试（解析严格性、请求合同、帧上传、回退路径、真实抽帧——FFmpeg 缺失时安全跳过）；57 个测试文件、typecheck、lint、build 四 gate 全部通过。
+- 网关协议文档补充帧级审查合同与 finding 格式。
+
 ## 2026-09-15 · 有限并行会审、重试预算形式化与不变量测试
 
 落地评审标注的新能力中可安全实现的部分：只读任务有限并行（变更任务严格串行）、重试预算与轮询上限、不变量回归。
