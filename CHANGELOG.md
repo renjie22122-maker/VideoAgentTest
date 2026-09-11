@@ -1,5 +1,18 @@
 # 更新记录
 
+## 2026-09-15 · Runtime V2 收口：Capability-first 路由与迁移一致性核对
+
+回应"新旧接口迁移未收口"的评审意见：逐条核对了 `requiredCapabilities ↔ capabilityRequirement`、`taskId` 传递、`AutoRun.tasks`、`server.ts` 体积——经查均为评审读到旧缓存快照，当前 main 无残留（`requiredCapabilities` 引用 0 处、`taskId` 已传入执行上下文、`AutoRun.tasks` 已定义、`server.ts` 209 行）。本轮完成评审列表中唯一真实剩余的收口项：
+
+### 新增
+
+- **Capability-first 路由**：Planner 决策的 `roleId` 变为可选——仅提供 `capability` 时由 Policy Engine 校验该能力满足动作要求后，经 Capability Router 指派第一个合格岗位（决策归一化为带岗位的最终形态，下游零改动）；既无岗位也无能力时保留历史报错语义。Planner prompt 同步更新为"roleId 与 capability 至少其一"。
+- 评审提及的其余收口项核实结论：`capabilityRequirement / preconditions / effects / approval` 已是 Policy 与 Registry 的唯一契约；命令注册表迁移已完成（server.ts 仅 209 行，只负责锁/载入/守卫/分发/持久化）；planner prompt 已瘦身（604 字）并保留安全不变量。
+
+### 文档与验证
+
+- 新增 capability-first 路由测试（仅能力 → 路由到导演 / 能力不满足 → 拒绝 / 双缺 → 历史报错）；54 个测试文件、typecheck、lint、build 四 gate 全部通过。
+
 ## 2026-09-15 · 后台推进、账本对账与固定场景评测
 
 补齐评审标注"尚未完成"的执行底座：脱离页面请求推进、执行账本与项目状态对账、可重复的运行质量评测。

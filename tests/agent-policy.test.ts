@@ -47,6 +47,36 @@ void test('policy verdicts keep the historical violation order and messages', ()
   assert.throws(() => validateAutoDecision({ action: 'revise_shots', roleId: 'producer', reason: 'x' }, p), /没有分镜可修改/);
 });
 
+void test('capability-first routing: a decision may omit roleId and the router assigns the agent', () => {
+  const p = project(true, true);
+  // Only a capability: the policy resolves the first eligible role.
+  const routed = evaluateAutoDecision(
+    { action: 'revise_shots', capability: 'revise_storyboard', reason: '修订' },
+    p,
+  );
+  assert.equal(routed.policy.allowed, true);
+  assert.equal(routed.decision.roleId, 'director', 'first enabled role granting revise_storyboard');
+  assert.equal(routed.decision.capability, 'revise_storyboard');
+  assert.doesNotThrow(() =>
+    validateAutoDecision(
+      { action: 'revise_shots', capability: 'revise_storyboard', reason: '修订' },
+      p,
+    ),
+  );
+  // A capability that cannot satisfy the action's requirement is refused.
+  const mismatch = evaluateAutoDecision(
+    { action: 'revise_shots', capability: 'review_qa', reason: '修订' },
+    p,
+  );
+  assert.equal(mismatch.policy.allowed, false);
+  assert.equal(mismatch.policy.violations[0].code, 'capability_missing');
+  // Neither roleId nor capability keeps the historical message.
+  assert.throws(
+    () => validateAutoDecision({ action: 'review', reason: 'x' }, p),
+    /未启用岗位/,
+  );
+});
+
 void test('capability authority: role grants are checked before any executor runs', () => {
   const p = project(true, true);
   // Producer is enabled and can review, but cannot revise storyboards.

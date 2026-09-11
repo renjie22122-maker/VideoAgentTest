@@ -5,6 +5,7 @@ import { getAgentAction } from './actions/registry.ts';
 import type { CapabilityRequirement } from './actions/types.ts';
 import { grantedCapabilities, satisfiesCapabilityRequirement, capabilityLabels } from './capabilities.ts';
 import type { CapabilityId } from './capabilities.ts';
+import { routeCapability } from './router.ts';
 import type { AutoDecision } from './planner.ts';
 
 /**
@@ -40,7 +41,7 @@ export function evaluateAutoDecision(
   p: Project,
 ): { decision: AutoDecision; policy: PolicyVerdict } {
   const roles = projectAgents(p).filter((r) => r.enabled);
-  const roleId = typeof raw.roleId === 'string' ? raw.roleId : 'producer';
+  const rawRoleId = typeof raw.roleId === 'string' ? raw.roleId : undefined;
   const actionId = typeof raw.action === 'string' ? raw.action : '';
   const actionValid = autoActions.includes(actionId as AutoDecision['action']);
   const reasonValid =
@@ -82,7 +83,12 @@ export function evaluateAutoDecision(
       code: 'invalid_task_fields',
       message: '总 Agent 返回了无效的能力标识、镜头目标或后续计划。',
     });
-  if (actionValid && actionId !== 'stop' && !roles.some((r) => r.id === raw.roleId))
+  if (
+    actionValid &&
+    actionId !== 'stop' &&
+    typeof raw.roleId === 'string' &&
+    !roles.some((r) => r.id === raw.roleId)
+  )
     violations.push({ code: 'role_disabled', message: '总 Agent 选择了未启用岗位。' });
   const action = actionValid ? getAgentAction(actionId as AutoDecision['action']) : undefined;
   if (actionValid && action) {
@@ -90,13 +96,45 @@ export function evaluateAutoDecision(
       if (!precondition.satisfied(p))
         violations.push({ code: precondition.id, message: precondition.message });
   }
+  // Capability-first routing: a decision may omit roleId when it declares a
+  // capability — the router then assigns the eligible agent. The declared
+  // capability must itself satisfy the action's requirement.
+  const declaredCapability =
+    capabilityValid && typeof raw.capability === 'string'
+      ? (raw.capability as CapabilityId)
+      : undefined;
+  let resolvedRoleId = rawRoleId;
+  if (
+    actionValid &&
+    actionId !== 'stop' &&
+    action &&
+    !resolvedRoleId &&
+    declaredCapability &&
+    satisfiesCapabilityRequirement([declaredCapability], action.capabilityRequirement)
+  ) {
+    resolvedRoleId = routeCapability(roles, declaredCapability)?.id;
+  }
   const granted =
     actionId !== 'stop'
-      ? [...grantedCapabilities(roles.find((r) => r.id === roleId))]
+      ? [...grantedCapabilities(roles.find((r) => r.id === resolvedRoleId))]
       : [];
   if (actionValid && actionId !== 'stop' && action) {
-    // Single interpreter shared with the action catalog — no drift possible.
-    if (!satisfiesCapabilityRequirement(granted, action.capabilityRequirement))
+    if (!resolvedRoleId && !declaredCapability) {
+      // Same historical message for a missing role with no routing capability.
+      if (violations.every((v) => v.code !== 'role_disabled'))
+        violations.push({ code: 'role_disabled', message: '总 Agent 选择了未启用岗位。' });
+    } else if (!resolvedRoleId) {
+      violations.push({
+        code: 'capability_missing',
+        message:
+          '没有已启用岗位授予执行「' +
+          actionId +
+          '」所需的能力（' +
+          capabilityLabel(action.capabilityRequirement) +
+          '）。请在岗位配置中补充能力。',
+      });
+    } else if (!satisfiesCapabilityRequirement(granted, action.capabilityRequirement)) {
+      // Single interpreter shared with the action catalog — no drift possible.
       violations.push({
         code: 'capability_missing',
         message:
@@ -106,9 +144,10 @@ export function evaluateAutoDecision(
           capabilityLabel(action.capabilityRequirement) +
           '）。请在岗位配置中补充能力。',
       });
+    }
   }
   const decision: AutoDecision = {
-    roleId,
+    roleId: resolvedRoleId ?? 'producer',
     action: actionId as AutoDecision['action'],
     reason: typeof raw.reason === 'string' ? raw.reason : '',
     ...(capabilityValid && typeof raw.capability === 'string'
