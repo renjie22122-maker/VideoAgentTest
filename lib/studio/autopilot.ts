@@ -6,7 +6,7 @@ import { planDecision } from './agent/planner.ts';
 import type { AutoDecision, PlanOutcome } from './agent/planner.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
 import { syncVerificationTask } from './agent/task.ts';
-import { getAgentAction, registeredAgentActions, describeAvailableActions } from './agent/actions/registry.ts';
+import { getAgentAction, registeredAgentActions, describeAllowedActions } from './agent/actions/registry.ts';
 import { nextScheduledTask } from './agent/scheduler.ts';
 import { buildQualityReport } from './quality-report.ts';
 
@@ -19,14 +19,14 @@ export { validateAutoDecision, planDecision } from './agent/planner.ts';
 export { evaluateAutoDecision, assertAutoDecision } from './agent/policy.ts';
 export type { PolicyVerdict, PolicyViolation } from './agent/policy.ts';
 export { buildObservation, unresolvedFindings } from './agent/observation.ts';
-export { getAgentAction, registeredAgentActions, agentActions, describeAvailableActions } from './agent/actions/registry.ts';
+export { getAgentAction, registeredAgentActions, agentActions, describeAllowedActions } from './agent/actions/registry.ts';
 export { beginStep, finishStep } from './agent/run-controller.ts';
 export { syncVerificationTask, openVerificationTask, taskKindForAction } from './agent/task.ts';
 export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from './agent/task.ts';
 export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities } from './agent/capabilities.ts';
 export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
 export { routeCapability, selectVerifier } from './agent/router.ts';
-export { nextScheduledTask, runnableTasks } from './agent/scheduler.ts';
+export { nextScheduledTask, runnableTasks, blockedReason } from './agent/scheduler.ts';
 
 /**
  * One automatic collaboration step.
@@ -57,9 +57,9 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   const baseObservation = buildObservation(p, run);
   const observation = {
     ...baseObservation,
-    // Data-driven action catalog: the planner sees capabilities/effects instead
-    // of more prose. The policy engine is the enforcement twin of this view.
-    availableActions: describeAvailableActions(baseObservation.roles, p),
+    // Single data-driven action truth source: capabilities, effects, approval
+    // semantics and preconditions — the policy engine is the enforcement twin.
+    allowedActions: describeAllowedActions(baseObservation.roles, p),
   };
   // The agent loop serves tasks: scheduled work (dependsOn satisfied) runs
   // before the LLM gets to propose anything new.

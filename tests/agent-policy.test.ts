@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   evaluateAutoDecision,
   validateAutoDecision,
-  describeAvailableActions,
+  describeAllowedActions,
   agentActions,
 } from '../lib/studio/autopilot.ts';
 import { demoPlan } from '../lib/studio/domain.ts';
@@ -50,7 +50,7 @@ void test('capability authority: role grants are checked before any executor run
   const producer = evaluateAutoDecision({ action: 'revise_shots', roleId: 'producer', reason: '修订' }, p);
   assert.equal(producer.policy.allowed, false);
   assert.equal(producer.policy.violations[0].code, 'capability_missing');
-  assert.ok(producer.policy.requiredCapabilities.includes('revise_storyboard'));
+  assert.ok(producer.policy.capabilityRequirement.anyOf!.includes('revise_storyboard'));
   assert.deepEqual(producer.policy.grantedCapabilities, ['plan_work', 'review_story']);
   const storyboard = evaluateAutoDecision({ action: 'revise_shots', roleId: 'storyboard', reason: '修订' }, p);
   assert.equal(storyboard.policy.allowed, true);
@@ -59,7 +59,7 @@ void test('capability authority: role grants are checked before any executor run
   // stop needs no capability and never mutates.
   const stop = evaluateAutoDecision({ action: 'stop', roleId: 'anything', reason: '结束' }, p);
   assert.equal(stop.policy.allowed, true);
-  assert.deepEqual(stop.policy.requiredCapabilities, []);
+  assert.deepEqual(stop.policy.capabilityRequirement, {});
   // Preconditions are checked before capability grants (historical order).
   const noAssets = evaluateAutoDecision({ action: 'design_assets', roleId: 'missing', reason: 'x' }, project(true, false));
   assert.equal(noAssets.policy.violations[0].code, 'role_disabled');
@@ -68,7 +68,7 @@ void test('capability authority: role grants are checked before any executor run
 void test('availableActions is the data-driven twin of the policy', () => {
   const p = project(true, true);
   const roles = defaultAgents();
-  const catalog = describeAvailableActions(roles, p);
+  const catalog = describeAllowedActions(roles, p);
   assert.equal(catalog.length, agentActions.length);
   for (const entry of catalog) {
     assert.ok(entry.description.trim());
@@ -76,8 +76,9 @@ void test('availableActions is the data-driven twin of the policy', () => {
   }
   const revise = catalog.find((e) => e.action === 'revise_shots')!;
   assert.equal(revise.allowed, true);
-  assert.deepEqual(revise.requiredCapabilities, ['revise_storyboard']);
+  assert.deepEqual(revise.capabilityRequirement.anyOf, ['revise_storyboard']);
   assert.equal(revise.requiresVerification, true);
+  assert.ok(revise.approval.trim());
   // Without any capable role the same action is reported blocked with a reason.
   const customOnly: Project = project(true, true);
   customOnly.production!.agentConfig = {
@@ -93,7 +94,7 @@ void test('availableActions is the data-driven twin of the policy', () => {
       },
     ],
   };
-  const blocked = describeAvailableActions(
+  const blocked = describeAllowedActions(
     customOnly.production!.agentConfig.agents,
     customOnly,
   ).find((e) => e.action === 'revise_shots')!;

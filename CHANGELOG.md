@@ -1,5 +1,22 @@
 # 更新记录
 
+## 2026-09-13 · Runtime 收敛：单一动作事实源、通用 Policy 与严格依赖语义
+
+按第三轮评审收敛，不再新增抽象：让已落地的骨架承担全部规则表达。
+
+### 修复
+
+- **单一动作事实源**：动作元数据新增 `approval`（批准/复核语义）与 `preconditions`（状态前置条件），Observation 的 `allowedActions` 全部由 ActionRegistry 动态派生；删除 `autoTaskContracts` 双源，supervisor 与 Policy Engine 看到同一份元数据。
+- **Policy Engine 通用化**：前置条件与能力要求改为遍历动作元数据评估（`capabilityRequirement` 显式区分 `allOf`（须全部）与 `anyOf`（任一）），消除逐动作硬编码 if；历史违规顺序与报错信息保持不变。
+- **Scheduler 依赖语义收紧**：依赖必须存在且 `completed` 才视为满足；缺失、运行中或 `cancelled` 一律阻塞（`blockedReason` 给出具体原因），防止截断或缺陷的任务图提前执行。
+- **瘦身 supervisor prompt**：移除逐动作规则散文（动作事实改由 `allowedActions` 元数据承担），保留质量报告、未解决问题、媒体禁令与人工批准等安全不变量。
+- 核实 GitHub 上 `autopilot.ts` 为纯门面（160 行，无旧执行逻辑）；评审读到的旧实现为缓存索引不同步，不存在 shadow architecture。
+
+### 文档与验证
+
+- 52 个测试文件全部通过（更新 policy/scheduler/runtime 契约测试），类型检查、代码规范与生产构建通过。
+- 架构文档更新动作元数据、通用 Policy 与严格依赖语义。
+
 ## 2026-09-12 · Runtime 内核第二阶段：Capability 授权、Task 调度与 Policy Engine
 
 延续上一版内核拆分，把 Task / Capability / Action 从“结构存在”变成“真正掌握运行权”。行为唯一有意的收紧：自定义岗位不再通过回退获得执行权限；被策略拒绝的决策不会触达任何模型调用。

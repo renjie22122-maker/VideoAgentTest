@@ -5,7 +5,7 @@ import {
   registeredAgentActions,
   agentActions,
   buildObservation,
-  describeAvailableActions,
+  describeAllowedActions,
   planDecision,
   beginStep,
   finishStep,
@@ -92,14 +92,16 @@ void test('planner observation carries the data-driven action catalog', () => {
   const base = buildObservation(p, run);
   const observation = {
     ...base,
-    availableActions: describeAvailableActions(base.roles, p),
+    allowedActions: describeAllowedActions(base.roles, p),
   };
-  const catalog = observation.availableActions;
+  const catalog = observation.allowedActions;
   assert.equal(catalog.length, 5);
   const revise = catalog.find((a) => a.action === 'revise_shots')!;
   assert.equal(revise.allowed, true);
   assert.equal(revise.requiresVerification, true);
   assert.ok(revise.effects.includes('approvals'));
+  assert.ok(revise.approval.trim());
+  assert.deepEqual(revise.capabilityRequirement.anyOf, ['revise_storyboard']);
   // roleCapabilities reflects declared-or-default grants per role.
   assert.ok(observation.roleCapabilities.writer.some((c) => c.id === 'write_screenplay'));
 });

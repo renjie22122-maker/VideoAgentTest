@@ -10,7 +10,16 @@ import type { AgentAction } from './types.ts';
 export const designAssetsAction: AgentAction = {
   id: 'design_assets',
   description: '新增未批准的文字设计候选；不合并、不删除、不选择版本、不生成图片。',
-  requiredCapabilities: ['design_art', 'design_character', 'design_environment', 'design_prop'],
+  approval: '所有文字候选均可稍后选择；缺少不可或缺主图仅阻断相关媒体生成，不停止文字协作。不替换批准版本，不生成图片。',
+  capabilityRequirement: { anyOf: ['design_art', 'design_character', 'design_environment', 'design_prop'] },
+  preconditions: [
+    {
+      id: 'assets_state_exists',
+      label: '已建立美术设定',
+      message: '请先确认剧本并建立美术设定。',
+      satisfied: (p) => !!p.production?.assets,
+    },
+  ],
   effects: ['assetCandidates'],
   requiresVerification: false,
   async execute(ctx) {

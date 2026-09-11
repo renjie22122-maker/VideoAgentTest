@@ -12,8 +12,9 @@ import type { CapabilityId } from '../capabilities.ts';
  * rules live here instead of in a single dispatch switch.
  *
  * The metadata fields are the data-driven half of the policy: the planner's
- * observation renders them as availableActions, and the policy engine
- * evaluates them into allow / deny verdicts.
+ * observation renders them as allowedActions, and the policy engine
+ * evaluates them into allow / deny verdicts — it contains no per-action
+ * hardcoding.
  */
 export type ActionExecutionContext = {
   project: Project;
@@ -26,16 +27,30 @@ export type ActionExecutionContext = {
   contentBefore: string;
 };
 
+/** Explicit capability semantics: allOf must ALL be granted; anyOf needs one. */
+export type CapabilityRequirement = {
+  allOf?: readonly CapabilityId[];
+  anyOf?: readonly CapabilityId[];
+};
+
+/** Declared precondition: the policy engine checks it before any model call. */
+export type ActionPrecondition = {
+  id: string;
+  label: string;
+  message: string;
+  satisfied(p: Project): boolean;
+};
+
 export interface AgentAction {
   readonly id: AutoDecision['action'];
-  /** One-line description shown to the supervisor via availableActions. */
+  /** One-line description shown to the supervisor via allowedActions. */
   readonly description: string;
-  /**
-   * Capabilities that authorize this action. ANY-of semantics: the executing
-   * role must grant at least one. An empty list means the action is safe for
-   * the supervisor itself (stop).
-   */
-  readonly requiredCapabilities: readonly CapabilityId[];
+  /** Approval / verification semantics — the replacement for prompt prose. */
+  readonly approval: string;
+  /** Capabilities that authorize this action. */
+  readonly capabilityRequirement: CapabilityRequirement;
+  /** State preconditions; checked generically by the policy engine. */
+  readonly preconditions: readonly ActionPrecondition[];
   /** Resource kinds this action mutates / invalidates; drives policy and lineage. */
   readonly effects: readonly string[];
   /** Whether a successful execution forces independent verification. */

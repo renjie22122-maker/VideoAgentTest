@@ -13,7 +13,9 @@ import type { AgentAction } from './types.ts';
 export const writeScriptAction: AgentAction = {
   id: 'write_script',
   description: '生成或修改结构化剧本；结果保持未确认，下游全部失效并等待人工批准。',
-  requiredCapabilities: ['write_screenplay'],
+  approval: '停止并等待用户确认剧本。',
+  capabilityRequirement: { anyOf: ['write_screenplay'] },
+  preconditions: [],
   effects: ['script', 'assets', 'storyboard', 'media', 'approvals'],
   requiresVerification: false,
   async execute(ctx) {

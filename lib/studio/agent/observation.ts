@@ -1,6 +1,6 @@
 import { ASSET_POLICY_GUIDE, assetRequirementManifest } from '../asset-policy.ts';
 import { projectAgents } from '../team-config.ts';
-import { autoTaskContracts, currentAutoFindings } from '../auto-run-state.ts';
+import { currentAutoFindings } from '../auto-run-state.ts';
 import type { AutoRun } from '../auto-run-state.ts';
 import { buildQualityReport } from '../quality-report.ts';
 import { capabilitiesForRole, capabilityLabels } from './capabilities.ts';
@@ -22,7 +22,8 @@ export function buildObservation(p: Project, run: AutoRun) {
     storyContext: p.storyContext,
     stage: p.production!.node,
     roles,
-    allowedActions: autoTaskContracts,
+    // allowedActions is injected by the runtime facade from the action
+    // registry — a single, data-driven truth source (see describeAllowedActions).
     // Capability dimension: roles stay the UI identity; the runtime routes by
     // capability. Declared grants win; known roles fall back to defaults.
     roleCapabilities: Object.fromEntries(

@@ -46,9 +46,10 @@ getAgentAction     ActionRegistry      白名单动作执行器，每个动作�
 beginStep/finish   RunController       步骤记账、指纹去重、预算耗尽、失败标记
 ```
 
-- 动作契约在 `agent/actions/types.ts`：每个动作声明 `requiredCapabilities / effects / requiresVerification` 与描述；这些元数据以 `availableActions` 注入 Observation，是 policy 的数据孪生，也是未来瘦身 planner prompt 的基础。
-- `AgentTask`（agent/task.ts）记录每一步的岗位、能力、输入版本与结果；分镜修订把 `pendingReview` 镜像为 `verify_storyboard` 复核任务，Scheduler 按 `dependsOn` 判定就绪后强制安排独立复核（作者不能自验）。任务记录只增不改，超限截断。
-- 能力模型（agent/capabilities.ts）把“岗位身份”与“能干什么”分开：`capabilityForDecision` 只是描述性元数据，**授权是严格的一等行为**——Policy Engine 检查岗位的显式声明或内置默认授予，自定义岗位不声明能力就拒绝，绝不因回退获得权限（agent/policy.ts）。`AgentConfig` 已支持声明 `capabilities` 字段。
+- 动作契约在 `agent/actions/types.ts`：每个动作声明 `description / approval / capabilityRequirement(anyOf|allOf) / preconditions / effects / requiresVerification`；这些元数据以 `allowedActions` 注入 Observation，是 supervisor 的**单一动作事实源**（prompt 不再用散文重复动作规则），也是 Policy Engine 的评估输入。
+- `AgentTask`（agent/task.ts）记录每一步的岗位、能力、输入版本与结果；分镜修订把 `pendingReview` 镜像为 `verify_storyboard` 复核任务，Scheduler 按 `dependsOn` 判定就绪后强制安排独立复核（作者不能自验）。就绪语义严格：依赖必须存在且 completed，缺失、未完成或 cancelled 一律阻塞。任务记录只增不改，超限截断。
+- 能力模型（agent/capabilities.ts）把“岗位身份”与“能干什么”分开：`capabilityForDecision` 只是描述性元数据，**授权是严格的一等行为**——Policy Engine 检查岗位的显式声明或内置默认授予，`allOf` 须全部满足、`anyOf` 须至少一项；自定义岗位不声明能力就拒绝，绝不因回退获得权限（agent/policy.ts）。`AgentConfig` 已支持声明 `capabilities` 字段。
+- Policy Engine（agent/policy.ts）是通用评估器：仅白名单、岗位成员与理由形状是固定检查，前置条件与能力要求全部来自动作元数据，无逐动作硬编码。
 - 规划器永远不直接拥有昂贵副作用：媒体生成、批准与队列仍在命令层，动作白名单只覆盖文字协作。
 
 ## 命令注册表

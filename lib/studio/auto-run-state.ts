@@ -40,14 +40,6 @@ export type AutoRun = {
   tasks?: import('./agent/task.ts').AgentTask[];
 };
 
-export const autoTaskContracts = [
-  { action: 'review', output: '当前版本文本会审报告', mutatesContent: false, approval: '不代表实际画面通过' },
-  { action: 'revise_shots', output: '保留已确认剧本的完整分镜', mutatesContent: true, approval: '后续必须由另一岗位复核，之后仍需用户批准生成' },
-  { action: 'write_script', output: '未确认的完整剧本', mutatesContent: true, approval: '停止并等待用户确认剧本' },
-  { action: 'design_assets', output: '未批准的文字设计候选', mutatesContent: true, approval: '所有文字候选均可稍后选择；缺少不可或缺主图仅阻断相关媒体生成，不停止文字协作。不替换批准版本，不生成图片' },
-  { action: 'stop', output: '停止理由和剩余事项', mutatesContent: false, approval: '存在未复核修改或未解决问题时不能标为成功' },
-] as const;
-
 export function createAutoRun(p: Project, instruction: string, maxSteps = 4): AutoRun {
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 12) throw new Error('自动协作步数须为 1–12。');
   const previous = p.production?.autoRun?.pendingReview;

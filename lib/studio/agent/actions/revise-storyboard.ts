@@ -16,7 +16,11 @@ import type { AgentAction } from './types.ts';
 export const reviseStoryboardAction: AgentAction = {
   id: 'revise_shots',
   description: '修订完整分镜，保留已确认剧本、对白与场次时长；下游素材与批准随之失效。',
-  requiredCapabilities: ['revise_storyboard'],
+  approval: '后续必须由另一岗位复核，之后仍需用户批准生成。',
+  capabilityRequirement: { anyOf: ['revise_storyboard'] },
+  preconditions: [
+    { id: 'storyboard_exists', label: '存在分镜', message: '没有分镜可修改。', satisfied: (p) => !!p.plan },
+  ],
   effects: ['storyboard', 'prompts', 'media', 'approvals'],
   requiresVerification: true,
   async execute(ctx) {

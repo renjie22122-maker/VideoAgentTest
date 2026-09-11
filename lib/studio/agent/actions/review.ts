@@ -11,7 +11,9 @@ import type { AgentAction } from './types.ts';
 export const reviewAction: AgentAction = {
   id: 'review',
   description: '部门文本会审：按当前修订出具结构化报告，不修改作品，不声称看过画面。',
-  requiredCapabilities: ['review_story', 'review_camera', 'review_continuity', 'review_qa'],
+  approval: '不代表实际画面通过。',
+  capabilityRequirement: { anyOf: ['review_story', 'review_camera', 'review_continuity', 'review_qa'] },
+  preconditions: [],
   effects: ['teamReports'],
   requiresVerification: false,
   async execute(ctx) {

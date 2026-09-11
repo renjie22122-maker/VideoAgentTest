@@ -1,8 +1,7 @@
 import type { AgentDefinition } from '../../team-config.ts';
 import type { Project } from '../../types.ts';
 import { capabilitiesForRole } from '../capabilities.ts';
-import type { CapabilityId } from '../capabilities.ts';
-import type { AgentAction } from './types.ts';
+import type { AgentAction, CapabilityRequirement } from './types.ts';
 import { reviewAction } from './review.ts';
 import { reviseStoryboardAction } from './revise-storyboard.ts';
 import { writeScriptAction } from './write-script.ts';
@@ -36,17 +35,19 @@ export function registeredAgentActions(): readonly string[] {
 
 /**
  * Data-driven action catalog for the planner observation: what each action
- * does, which capability authorizes it, whether the current team can perform
- * it and why not. This is the seed for shrinking the supervisor prompt — the
- * runtime facts stop being repeated as prose.
+ * does, which capability authorizes it, what it needs, whether the current
+ * team can perform it and why not. This is the single truth source for the
+ * supervisor's allowedActions — the prompt no longer repeats action facts
+ * as prose.
  */
-export function describeAvailableActions(
+export function describeAllowedActions(
   roles: readonly AgentDefinition[],
   p: Project,
 ): {
   action: string;
   description: string;
-  requiredCapabilities: readonly CapabilityId[];
+  approval: string;
+  capabilityRequirement: CapabilityRequirement;
   requiresVerification: boolean;
   effects: readonly string[];
   allowed: boolean;
@@ -54,19 +55,23 @@ export function describeAvailableActions(
 }[] {
   return agentActions.map((a) => {
     const reasons: string[] = [];
-    if (a.requiredCapabilities.length) {
+    const requirement = a.capabilityRequirement;
+    const needed = [...(requirement.allOf ?? []), ...(requirement.anyOf ?? [])];
+    if (needed.length) {
       const capable = roles.filter((r) =>
-        a.requiredCapabilities.some((c) => capabilitiesForRole(r.id, roles).includes(c)),
+        (requirement.allOf ?? []).every((c) => capabilitiesForRole(r.id, roles).includes(c)) &&
+        (requirement.anyOf ?? []).some((c) => capabilitiesForRole(r.id, roles).includes(c)),
       );
       if (!capable.length)
-        reasons.push('没有已启用岗位授予所需能力（' + a.requiredCapabilities.join('/') + '）。');
+        reasons.push('没有已启用岗位授予所需能力（' + needed.join('/') + '）。');
     }
-    if (a.id === 'revise_shots' && !p.plan) reasons.push('当前没有分镜。');
-    if (a.id === 'design_assets' && !p.production?.assets) reasons.push('尚未建立美术设定。');
+    for (const precondition of a.preconditions)
+      if (!precondition.satisfied(p)) reasons.push(precondition.message);
     return {
       action: a.id,
       description: a.description,
-      requiredCapabilities: a.requiredCapabilities,
+      approval: a.approval,
+      capabilityRequirement: requirement,
       requiresVerification: a.requiresVerification,
       effects: a.effects,
       allowed: reasons.length === 0,

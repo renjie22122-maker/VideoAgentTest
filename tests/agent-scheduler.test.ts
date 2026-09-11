@@ -6,6 +6,7 @@ import {
   syncVerificationTask,
   nextScheduledTask,
   runnableTasks,
+  blockedReason,
   selectVerifier,
   routeCapability,
 } from '../lib/studio/autopilot.ts';
@@ -34,7 +35,7 @@ const project = () =>
     production: initialProduction(),
   }) as Project;
 
-void test('dependsOn is the readiness criterion: blocked tasks are never runnable', () => {
+void test('dependsOn is strict: missing, running or cancelled dependencies block the task', () => {
   const p = project();
   const run = createAutoRun(p, '任务');
   run.tasks = [
@@ -45,7 +46,16 @@ void test('dependsOn is the readiness criterion: blocked tasks are never runnabl
   // A still-running dependency blocks the verification task.
   run.tasks[0].status = 'running';
   assert.deepEqual(runnableTasks(run), []);
-  run.tasks[0].status = 'cancelled'; // refused steps satisfy the dependency
+  // Cancelled does NOT satisfy a dependency: verification never runs for
+  // work that did not land.
+  run.tasks[0].status = 'cancelled';
+  assert.deepEqual(runnableTasks(run), []);
+  assert.match(blockedReason(run.tasks[1], run.tasks)!, /未完成/);
+  // A dependency that does not exist at all blocks instead of passing.
+  run.tasks[1].dependsOn = ['task-never-created'];
+  assert.deepEqual(runnableTasks(run), []);
+  assert.match(blockedReason(run.tasks[1], run.tasks)!, /不存在/);
+  run.tasks[1].dependsOn = [];
   assert.deepEqual(runnableTasks(run).map((t) => t.id), ['t2']);
 });
 

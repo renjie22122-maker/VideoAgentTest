@@ -2,6 +2,7 @@ import { projectAgents } from '../team-config.ts';
 import { autoActions } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import { getAgentAction } from './actions/registry.ts';
+import type { CapabilityRequirement } from './actions/types.ts';
 import { grantedCapabilities } from './capabilities.ts';
 import type { CapabilityId } from './capabilities.ts';
 import type { AutoDecision } from './planner.ts';
@@ -11,17 +12,28 @@ import type { AutoDecision } from './planner.ts';
  * may execute. Planner prompts and UI hints describe rules; this module is
  * where allow / deny actually happens. The verdict doubles as the structured
  * explanation the observation and future task UI can render.
+ *
+ * Generic by design: action whitelisting, role membership and reason shape
+ * are the only fixed checks; preconditions and capability requirements come
+ * from the action's own metadata.
  */
 export type PolicyViolation = { code: string; message: string };
 export type PolicyVerdict = {
   allowed: boolean;
   actionId: string;
-  requiredCapabilities: readonly CapabilityId[];
+  capabilityRequirement: CapabilityRequirement;
   grantedCapabilities: readonly CapabilityId[];
   requiresVerification: boolean;
   effects: readonly string[];
   violations: PolicyViolation[];
 };
+
+function capabilityLabel(requirement: CapabilityRequirement): string {
+  return [
+    ...(requirement.allOf?.length ? ['全部(' + requirement.allOf.join('+') + ')'] : []),
+    ...(requirement.anyOf?.length ? ['任一(' + requirement.anyOf.join('/') + ')'] : []),
+  ].join(' 且 ');
+}
 
 export function evaluateAutoDecision(
   raw: Record<string, unknown>,
@@ -41,25 +53,30 @@ export function evaluateAutoDecision(
     });
   if (actionValid && actionId !== 'stop' && !roles.some((r) => r.id === raw.roleId))
     violations.push({ code: 'role_disabled', message: '总 Agent 选择了未启用岗位。' });
-  if (actionValid && actionId === 'revise_shots' && !p.plan)
-    violations.push({ code: 'storyboard_missing', message: '没有分镜可修改。' });
-  if (actionValid && actionId === 'design_assets' && !p.production?.assets)
-    violations.push({
-      code: 'assets_missing',
-      message: '请先确认剧本并建立美术设定。',
-    });
   const action = actionValid ? getAgentAction(actionId as AutoDecision['action']) : undefined;
-  const granted = actionId !== 'stop' ? [...grantedCapabilities(roles.find((r) => r.id === roleId))] : [];
-  if (actionValid && actionId !== 'stop' && action && action.requiredCapabilities.length) {
-    const authorized = action.requiredCapabilities.some((c) => granted.includes(c));
-    if (!authorized)
+  if (actionValid && action) {
+    for (const precondition of action.preconditions)
+      if (!precondition.satisfied(p))
+        violations.push({ code: precondition.id, message: precondition.message });
+  }
+  const granted =
+    actionId !== 'stop'
+      ? [...grantedCapabilities(roles.find((r) => r.id === roleId))]
+      : [];
+  if (actionValid && actionId !== 'stop' && action) {
+    const requirement = action.capabilityRequirement;
+    const allOfOk =
+      !requirement.allOf?.length || requirement.allOf.every((c) => granted.includes(c));
+    const anyOfOk =
+      !requirement.anyOf?.length || requirement.anyOf.some((c) => granted.includes(c));
+    if (!allOfOk || !anyOfOk)
       violations.push({
         code: 'capability_missing',
         message:
           '总 Agent 选择的岗位未授予执行「' +
           actionId +
           '」所需的能力（' +
-          action.requiredCapabilities.join('/') +
+          capabilityLabel(requirement) +
           '）。请在岗位配置中补充能力。',
       });
   }
@@ -73,7 +90,7 @@ export function evaluateAutoDecision(
     policy: {
       allowed: violations.length === 0,
       actionId,
-      requiredCapabilities: action?.requiredCapabilities ?? [],
+      capabilityRequirement: action?.capabilityRequirement ?? {},
       grantedCapabilities: granted,
       requiresVerification: action?.requiresVerification ?? false,
       effects: action?.effects ?? [],

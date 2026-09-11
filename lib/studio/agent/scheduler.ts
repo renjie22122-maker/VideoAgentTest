@@ -7,23 +7,33 @@ import { selectVerifier } from './router.ts';
 /**
  * Task Scheduler (sequential kernel). The agent loop serves tasks: before
  * asking the LLM what to do next, the runtime checks whether a pre-planned
- * task has become runnable — dependencies satisfied, verification pending.
- * Today the only pre-planned task kind is verify_storyboard; the planner
- * still plans the rest, and dependsOn is the readiness criterion the
- * scheduler already enforces.
+ * task has become runnable. Today the only pre-planned task kind is
+ * verify_storyboard; the planner still plans the rest.
+ *
+ * Readiness semantics are strict: every dependency must EXIST and be
+ * completed. A missing or non-completed dependency blocks the task — being
+ * lenient here would let truncated or buggy task graphs run ahead of their
+ * prerequisites.
  */
 export type ScheduledDecision = { task: AgentTask; decision: AutoDecision };
 
+export function blockedReason(task: AgentTask, tasks: readonly AgentTask[]): string | undefined {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  for (const id of task.dependsOn) {
+    const dependency = byId.get(id);
+    if (!dependency) return '依赖任务不存在：' + id;
+    if (dependency.status !== 'completed')
+      return '依赖任务未完成：' + id + '（' + dependency.status + '）';
+  }
+  return undefined;
+}
+
 export function runnableTasks(run: AutoRun): AgentTask[] {
   const tasks = run.tasks ?? [];
-  const byId = new Map(tasks.map((t) => [t.id, t]));
   return tasks.filter(
     (t) =>
       (t.status === 'pending' || t.status === 'verification') &&
-      t.dependsOn.every((id) => {
-        const dependency = byId.get(id);
-        return !dependency || dependency.status === 'completed' || dependency.status === 'cancelled';
-      }),
+      blockedReason(t, tasks) === undefined,
   );
 }
 
