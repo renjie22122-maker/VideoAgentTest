@@ -21,6 +21,9 @@ export type AgentRunRow = {
   maxSteps: number;
   instruction: string;
   summary: string;
+  /** How many project saves actually committed after this run's steps. */
+  commitCount: number;
+  committedFingerprint: string;
   updatedAt: number;
 };
 
@@ -37,6 +40,8 @@ export type AgentTaskRow = {
   outcome: string;
   reason: string;
   verificationAuthor: string;
+  /** Predicted commit number of the save that should follow this step. */
+  commitCount: number;
   updatedAt: number;
 };
 
@@ -72,6 +77,9 @@ export interface Ledger {
   upsertAgentTask(row: AgentTaskRow): void;
   upsertGenerationJob(row: GenerationJobRow): void;
   recordUsage(row: UsageRow): void;
+  /** Records that the project containing this run was actually saved. */
+  markRunCommitted(runId: string, fingerprint: string): void;
+  runCommitCount(runId: string): number;
   generationJob(jobId: string): GenerationJobRow | undefined;
   generationJobs(projectId: string): GenerationJobRow[];
   agentTasks(runId: string): AgentTaskRow[];
@@ -91,11 +99,13 @@ try {
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agent_runs(
   run_id TEXT PRIMARY KEY, project_id TEXT, status TEXT, steps INTEGER,
-  max_steps INTEGER, instruction TEXT, summary TEXT, updated_at INTEGER);
+  max_steps INTEGER, instruction TEXT, summary TEXT, commit_count INTEGER DEFAULT 0,
+  committed_fingerprint TEXT DEFAULT '', updated_at INTEGER);
 CREATE TABLE IF NOT EXISTS agent_tasks(
   task_id TEXT PRIMARY KEY, run_id TEXT, project_id TEXT, kind TEXT, status TEXT,
   owner_role_id TEXT, capability TEXT, depends_on TEXT, input_revision INTEGER,
-  outcome TEXT, reason TEXT, verification_author TEXT, updated_at INTEGER);
+  outcome TEXT, reason TEXT, verification_author TEXT, commit_count INTEGER DEFAULT 0,
+  updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON agent_tasks(run_id);
 CREATE TABLE IF NOT EXISTS generation_jobs(
   job_id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, kind TEXT, status TEXT,
@@ -118,30 +128,54 @@ function sqliteLedger(dbPath: string): Ledger {
     db.exec("ALTER TABLE agent_tasks ADD COLUMN reason TEXT DEFAULT ''");
   if (!columns.some((c) => c.name === 'verification_author'))
     db.exec("ALTER TABLE agent_tasks ADD COLUMN verification_author TEXT DEFAULT ''");
+  if (!columns.some((c) => c.name === 'commit_count'))
+    db.exec('ALTER TABLE agent_tasks ADD COLUMN commit_count INTEGER DEFAULT 0');
+  const runColumns = db.prepare('PRAGMA table_info(agent_runs)').all() as { name: string }[];
+  if (!runColumns.some((c) => c.name === 'commit_count'))
+    db.exec('ALTER TABLE agent_runs ADD COLUMN commit_count INTEGER DEFAULT 0');
+  if (!runColumns.some((c) => c.name === 'committed_fingerprint'))
+    db.exec("ALTER TABLE agent_runs ADD COLUMN committed_fingerprint TEXT DEFAULT ''");
   return {
     backend: 'sqlite',
     upsertAgentRun(row) {
       db.prepare(
-        `INSERT INTO agent_runs(run_id,project_id,status,steps,max_steps,instruction,summary,updated_at)
-         VALUES(?,?,?,?,?,?,?,?)
+        `INSERT INTO agent_runs(run_id,project_id,status,steps,max_steps,instruction,summary,commit_count,committed_fingerprint,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(run_id) DO UPDATE SET status=excluded.status, steps=excluded.steps,
            summary=excluded.summary, updated_at=excluded.updated_at`,
       ).run(
         row.runId, row.projectId, row.status, row.steps, row.maxSteps,
-        row.instruction.slice(0, 4000), row.summary.slice(0, 4000), row.updatedAt,
+        row.instruction.slice(0, 4000), row.summary.slice(0, 4000),
+        row.commitCount, row.committedFingerprint.slice(0, 100), row.updatedAt,
       );
+    },
+    markRunCommitted(runId, fingerprint) {
+      if (!runId) return;
+      const existing = db
+        .prepare('SELECT commit_count FROM agent_runs WHERE run_id = ?')
+        .get(runId) as { commit_count?: number } | undefined;
+      const next = (existing?.commit_count ?? 0) + 1;
+      db.prepare(
+        `UPDATE agent_runs SET commit_count = ?, committed_fingerprint = ?, updated_at = ? WHERE run_id = ?`,
+      ).run(next, fingerprint.slice(0, 100), Date.now(), runId);
+    },
+    runCommitCount(runId) {
+      const row = db
+        .prepare('SELECT commit_count FROM agent_runs WHERE run_id = ?')
+        .get(runId) as { commit_count?: number } | undefined;
+      return row?.commit_count ?? 0;
     },
     upsertAgentTask(row) {
       db.prepare(
-        `INSERT INTO agent_tasks(task_id,run_id,project_id,kind,status,owner_role_id,capability,depends_on,input_revision,outcome,reason,verification_author,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO agent_tasks(task_id,run_id,project_id,kind,status,owner_role_id,capability,depends_on,input_revision,outcome,reason,verification_author,commit_count,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(task_id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome,
-           updated_at=excluded.updated_at`,
+           commit_count=excluded.commit_count, updated_at=excluded.updated_at`,
       ).run(
         row.taskId, row.runId, row.projectId, row.kind, row.status, row.ownerRoleId,
         row.capability, row.dependsOn.slice(0, 2000), row.inputRevision,
         row.outcome.slice(0, 200), row.reason.slice(0, 1500), row.verificationAuthor.slice(0, 100),
-        row.updatedAt,
+        row.commitCount, row.updatedAt,
       );
     },
     upsertGenerationJob(row) {
@@ -225,11 +259,45 @@ function jsonlLedger(dbPath: string): Ledger {
     }
     return undefined;
   };
+  /** Latest row per id — the same semantic SQLite's UPSERT provides. */
+  const latestById = <T extends JsonlRow>(type: T['type'], idKey: string): Map<string, T> => {
+    const map = new Map<string, T>();
+    for (const row of rows) {
+      const typed = row as T;
+      if (typed.type !== type) continue;
+      const seq = Number(typed.seq ?? 0);
+      const previous = map.get(String(typed[idKey]));
+      if (!previous || seq >= Number(previous.seq ?? 0)) map.set(String(typed[idKey]), typed);
+    }
+    return map;
+  };
   return {
     backend: 'jsonl',
     upsertAgentRun(row) {
       const previous = latestOf<JsonlRow & { seq: number }>('run', 'runId', row.runId);
-      append('run', { ...row, seq: (previous?.seq ?? 0) + 1 });
+      append('run', {
+        ...row,
+        seq: (previous?.seq ?? 0) + 1,
+        ...(previous
+          ? { commitCount: Math.max(row.commitCount, Number(previous.commitCount ?? 0)) }
+          : {}),
+      });
+    },
+    markRunCommitted(runId, fingerprint) {
+      if (!runId) return;
+      const previous = latestOf<JsonlRow & { seq: number }>('run', 'runId', runId);
+      append('run', {
+        ...previous,
+        runId,
+        seq: (previous?.seq ?? 0) + 1,
+        commitCount: (Number(previous?.commitCount ?? 0)) + 1,
+        committedFingerprint: fingerprint,
+        updatedAt: Date.now(),
+      });
+    },
+    runCommitCount(runId) {
+      const row = latestOf<JsonlRow>('run', 'runId', runId);
+      return Number(row?.commitCount ?? 0);
     },
     upsertAgentTask(row) {
       const previous = latestOf<JsonlRow & { seq: number }>('task', 'taskId', row.taskId);
@@ -258,10 +326,14 @@ function jsonlLedger(dbPath: string): Ledger {
       return latestOf('job', 'jobId', jobId) as GenerationJobRow | undefined;
     },
     generationJobs(projectId) {
-      return rows.filter((r) => r.type === 'job' && r.projectId === projectId) as unknown as GenerationJobRow[];
+      return [...latestById<JsonlRow & { projectId?: string }>('job', 'jobId').values()]
+        .filter((r) => r.projectId === projectId)
+        .map((r) => r as unknown as GenerationJobRow);
     },
     agentTasks(runId) {
-      return rows.filter((r) => r.type === 'task' && r.runId === runId) as unknown as AgentTaskRow[];
+      return [...latestById<JsonlRow & { runId?: string }>('task', 'taskId').values()]
+        .filter((r) => r.runId === runId)
+        .map((r) => r as unknown as AgentTaskRow);
     },
     usage(projectId) {
       return rows.filter((r) => r.type === 'usage' && r.projectId === projectId) as unknown as UsageRow[];
@@ -306,6 +378,7 @@ function toTaskRow(row: Record<string, unknown>): AgentTaskRow {
     outcome: str(row.outcome),
     reason: str(row.reason),
     verificationAuthor: str(row.verification_author ?? row.verificationAuthor),
+    commitCount: num(row.commit_count ?? row.commitCount),
     updatedAt: num(row.updated_at ?? row.updatedAt),
   };
 }
@@ -330,7 +403,11 @@ export function openLedger(): Ledger {
   const dbPath = path.resolve(process.env.STUDIO_DATA_DIR || '.studio', 'runtime.db');
   if (shared && sharedPath === dbPath) return shared;
   shared?.close();
-  shared = sqliteModule ? sqliteLedger(dbPath) : jsonlLedger(dbPath);
+  // LEDGER_BACKEND forces a backend for tests and downgraded environments.
+  shared =
+    sqliteModule && process.env.LEDGER_BACKEND !== 'jsonl'
+      ? sqliteLedger(dbPath)
+      : jsonlLedger(dbPath);
   sharedPath = dbPath;
   return shared;
 }

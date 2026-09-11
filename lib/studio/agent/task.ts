@@ -6,6 +6,7 @@ import { safely } from '../durable/ledger.ts';
 
 /** Persist a task at creation time: pending work is durable before it runs. */
 export function persistTaskRecord(task: AgentTask, run: AutoRun, p: Project) {
+  const committedNow = safely((ledger) => ledger.runCommitCount(run.id ?? '')) ?? 0;
   safely((ledger) =>
     ledger.upsertAgentTask({
       taskId: task.id,
@@ -20,6 +21,7 @@ export function persistTaskRecord(task: AgentTask, run: AutoRun, p: Project) {
       outcome: task.result?.outcome ?? '',
       reason: task.reason,
       verificationAuthor: task.verification?.authorRoleId ?? '',
+      commitCount: committedNow + 1,
       updatedAt: task.updatedAt,
     }),
   );
@@ -141,13 +143,37 @@ export function materializeDecisionTask(
 export function reconcileRunTasks(run: AutoRun, p: Project): number {
   const rows = safely((ledger) => ledger.agentTasks(run.id ?? '')) ?? [];
   if (!rows.length) return 0;
+  const committed = safely((ledger) => ledger.runCommitCount(run.id ?? '')) ?? 0;
   const tasks = (run.tasks ??= []);
   const known = new Set(tasks.map((t) => t.id));
   let added = 0;
   for (const row of rows) {
-    if (known.has(row.taskId)) continue;
     const kind = row.kind as AgentTaskKind;
-    const status = row.status === 'running' ? 'failed' : (row.status as AgentTaskStatus);
+    // Conflict rules: a task that died mid-step ('running' in the ledger) OR
+    // whose completion was never followed by a committed project save
+    // (predicted commit number beyond the run's committed count) is an
+    // interrupted task — never silently re-executable.
+    const interrupted = row.status === 'running' || row.commitCount > committed;
+    const existing = tasks.find((t) => t.id === row.taskId);
+    if (existing) {
+      // Project-side conflict: a stale open status must not let an
+      // interrupted or already-terminal task run again.
+      const open = existing.status === 'pending' || existing.status === 'verification';
+      if (open && row.status !== existing.status) {
+        if (interrupted) {
+          existing.status = 'failed';
+          existing.attempts = Math.max(existing.attempts, 1);
+          existing.updatedAt = Date.now();
+        } else if (row.status === 'completed' || row.status === 'failed' || row.status === 'cancelled') {
+          existing.status = row.status as AgentTaskStatus;
+          if (row.outcome)
+            existing.result = { outcome: row.outcome as AgentTaskResult['outcome'] };
+          existing.updatedAt = row.updatedAt;
+        }
+      }
+      continue;
+    }
+    const status = interrupted ? 'failed' : (row.status as AgentTaskStatus);
     tasks.push({
       id: row.taskId,
       kind,
@@ -162,13 +188,13 @@ export function reconcileRunTasks(run: AutoRun, p: Project): number {
         revision: row.inputRevision,
         configRevision: p.production?.agentConfigRevision ?? 0,
       },
-      attempts: status === 'failed' ? 1 : 0,
+      attempts: interrupted ? 1 : 0,
       createdAt: row.updatedAt,
       updatedAt: row.updatedAt,
-      ...(row.outcome
+      ...(row.outcome && !interrupted
         ? { result: { outcome: row.outcome as AgentTaskResult['outcome'] } }
         : {}),
-      ...(kind === 'verify_storyboard'
+      ...(kind === 'verify_storyboard' && !interrupted
         ? {
             verification: {
               required: true,
@@ -178,6 +204,7 @@ export function reconcileRunTasks(run: AutoRun, p: Project): number {
           }
         : {}),
     });
+    known.add(row.taskId);
     added++;
   }
   return added;

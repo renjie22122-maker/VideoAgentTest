@@ -18,12 +18,18 @@ function persistRun(run: AutoRun, p: Project) {
       maxSteps: run.maxSteps,
       instruction: run.instruction,
       summary: run.summary ?? '',
+      commitCount: 0,
+      committedFingerprint: '',
       updatedAt: Date.now(),
     }),
   );
 }
 
 function persistTask(task: AgentTask, run: AutoRun, p: Project, outcome = '') {
+  // Predicted commit number of the save that follows this step: reconciliation
+  // compares it with the run's actually-committed count to detect results that
+  // never reached the project file.
+  const committedNow = safely((ledger) => ledger.runCommitCount(run.id ?? '')) ?? 0;
   safely((ledger) =>
     ledger.upsertAgentTask({
       taskId: task.id,
@@ -38,6 +44,7 @@ function persistTask(task: AgentTask, run: AutoRun, p: Project, outcome = '') {
       outcome,
       reason: task.reason,
       verificationAuthor: task.verification?.authorRoleId ?? '',
+      commitCount: committedNow + 1,
       updatedAt: task.updatedAt,
     }),
   );

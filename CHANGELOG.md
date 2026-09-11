@@ -1,5 +1,20 @@
 # 更新记录
 
+## 2026-09-15 · 任务恢复一致性收口：提交边界与状态冲突规则
+
+按第六轮评审把"任务四阶段（开始执行 / 执行结束 / 结果提交 / 恢复重建）"定义清楚：模型执行结束 ≠ 创作结果已持久保存；账本里的 completed 不能单独证明依赖已满足。
+
+### 修复
+
+- **结果提交点**：`agent_runs` 增加 `commit_count / committed_fingerprint`，仅在命令处理器**成功保存项目后**递增；任务行记录"预测提交号"（当前提交数 +1）。恢复时若任务的预测提交号超过 run 的实际提交数——即完成从未伴随项目落盘——恢复为 failed，下游 verify 依赖随之阻断：**未提交的修改不会被复核放行**。
+- **状态冲突规则**（项目 vs 账本，双向不盲信）：项目中的旧 pending/verification 遇到账本中的 running 或未提交完成 → 标记中断失败，**绝不静默重执行**；账本中已提交的终态可采纳升级项目旧状态。项目已提交完成而账本落后时不会被回退。
+- **JSONL 查询语义对齐**：`agentTasks` / `generationJobs` 按 id 归并到最新状态（与 SQLite UPSERT 等价），恢复循环防御重复 ID；新增 `LEDGER_BACKEND` 环境变量强制后端以便测试降级路径。
+- **评测指标真实化**：`scripts/eval-runtime.mjs` 的 supervisor 调用数从调用记录统计，复核指标改为检查 verify 任务**完成状态**而非仅存在。
+
+### 文档与验证
+
+- 新增冲突回归：pending+running → failed 且 Scheduler idle、completed 未提交 → failed 且 verify 阻断、committed 完成 → 正常恢复且 verify ready、JSONL 三次状态变更 → 单条最新记录；54 个测试文件、typecheck、lint、build 四 gate 全部通过。
+
 ## 2026-09-15 · Runtime V2 收口：Capability-first 路由与迁移一致性核对
 
 回应"新旧接口迁移未收口"的评审意见：逐条核对了 `requiredCapabilities ↔ capabilityRequirement`、`taskId` 传递、`AutoRun.tasks`、`server.ts` 体积——经查均为评审读到旧缓存快照，当前 main 无残留（`requiredCapabilities` 引用 0 处、`taskId` 已传入执行上下文、`AutoRun.tasks` 已定义、`server.ts` 209 行）。本轮完成评审列表中唯一真实剩余的收口项：

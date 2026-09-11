@@ -7,7 +7,8 @@ import { openLedger, closeLedger } from '../lib/studio/durable/ledger.ts';
 import { estimateLLMCost, estimateVideoCost, estimateImageCost } from '../lib/studio/durable/pricing.ts';
 import { tick, GENERATION_LEASE_MS } from '../lib/studio/commands/jobs.ts';
 import { startBackgroundWorker } from '../lib/studio/server.ts';
-import { createAutoRun, reconcileRunTasks } from '../lib/studio/autopilot.ts';
+import { createAutoRun, reconcileRunTasks, nextScheduledTask } from '../lib/studio/autopilot.ts';
+import { defaultAgents } from '../lib/studio/team-config.ts';
 import { demoPlan } from '../lib/studio/domain.ts';
 import { demoScreenplay } from '../lib/studio/screenplay.ts';
 import { initialProduction } from '../lib/studio/graph.ts';
@@ -82,6 +83,8 @@ void test('the ledger persists generation job submission boundaries across proce
     maxSteps: 4,
     instruction: '检查文本',
     summary: '',
+    commitCount: 0,
+    committedFingerprint: '',
     updatedAt: 2,
   });
   reopened.upsertAgentTask({
@@ -97,6 +100,7 @@ void test('the ledger persists generation job submission boundaries across proce
     outcome: 'reviewed',
     reason: '审查',
     verificationAuthor: '',
+    commitCount: 0,
     updatedAt: 3,
   });
   reopened.recordUsage({
@@ -377,6 +381,7 @@ void test('reconcileRunTasks restores ledger-known tasks and fails interrupted s
     outcome: '',
     reason: '待执行会审',
     verificationAuthor: '',
+    commitCount: 0,
     updatedAt: 1,
   });
   ledger.upsertAgentTask({
@@ -392,6 +397,7 @@ void test('reconcileRunTasks restores ledger-known tasks and fails interrupted s
     outcome: '',
     reason: '修订中断',
     verificationAuthor: '',
+    commitCount: 0,
     updatedAt: 2,
   });
   ledger.upsertAgentTask({
@@ -407,6 +413,7 @@ void test('reconcileRunTasks restores ledger-known tasks and fails interrupted s
     outcome: '',
     reason: '复核',
     verificationAuthor: 'storyboard',
+    commitCount: 0,
     updatedAt: 3,
   });
   // The project only knows the verify task; the others were lost in a crash.
@@ -436,6 +443,242 @@ void test('reconcileRunTasks restores ledger-known tasks and fails interrupted s
   assert.equal(crashed.status, 'failed', 'an interrupted step must surface as failed');
   // The project's own record wins over the ledger.
   assert.equal(run.tasks!.find((task) => task.id === 'task-verify')!.status, 'completed');
+});
+
+void test('project pending vs ledger running: the interrupted task is never re-executed', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'conflict-pending-'));
+  const old = process.env.STUDIO_DATA_DIR;
+  process.env.STUDIO_DATA_DIR = dir;
+  t.after(() => {
+    if (old === undefined) delete process.env.STUDIO_DATA_DIR;
+    else process.env.STUDIO_DATA_DIR = old;
+    closeLedger();
+  });
+  const p = project();
+  const run = createAutoRun(p, '任务');
+  run.id = 'run-conflict';
+  const taskRow = (status: string, commitCount: number) => ({
+    taskId: 't1',
+    runId: 'run-conflict',
+    projectId: p.id,
+    kind: 'review',
+    status,
+    ownerRoleId: 'reviewer',
+    capability: 'review_qa',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: '',
+    reason: '审查',
+    verificationAuthor: '',
+    commitCount,
+    updatedAt: 1,
+  });
+  const ledger = openLedger();
+  // Crash window: the project saved t1 as pending; execution began and the
+  // ledger recorded running; the process died before the project save.
+  run.tasks = [
+    {
+      id: 't1',
+      kind: 'review',
+      status: 'pending',
+      ownerRoleId: 'reviewer',
+      createdBy: 'system',
+      dependsOn: [],
+      targetShotIds: [],
+      reason: '审查',
+      inputVersions: { revision: 1, configRevision: 0 },
+      attempts: 0,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+  ];
+  ledger.upsertAgentRun({
+    runId: 'run-conflict',
+    projectId: p.id,
+    status: 'running',
+    steps: 1,
+    maxSteps: 4,
+    instruction: '任务',
+    summary: '',
+    commitCount: 0,
+    committedFingerprint: '',
+    updatedAt: 1,
+  });
+  ledger.upsertAgentTask(taskRow('running', 1));
+  reconcileRunTasks(run, p);
+  const task = run.tasks!.find((t) => t.id === 't1')!;
+  assert.equal(task.status, 'failed', 'a stale pending must not become re-executable');
+  assert.equal(nextScheduledTask(run, defaultAgents()).kind, 'idle');
+});
+
+void test('a completed ledger task whose result never committed is restored as failed and blocks its verify', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'conflict-uncommitted-'));
+  const old = process.env.STUDIO_DATA_DIR;
+  process.env.STUDIO_DATA_DIR = dir;
+  t.after(() => {
+    if (old === undefined) delete process.env.STUDIO_DATA_DIR;
+    else process.env.STUDIO_DATA_DIR = old;
+    closeLedger();
+  });
+  const p = project();
+  const run = createAutoRun(p, '任务');
+  run.id = 'run-uncommitted';
+  const ledger = openLedger();
+  ledger.upsertAgentRun({
+    runId: 'run-uncommitted',
+    projectId: p.id,
+    status: 'running',
+    steps: 1,
+    maxSteps: 4,
+    instruction: '任务',
+    summary: '',
+    commitCount: 1, // only ONE save ever happened
+    committedFingerprint: '',
+    updatedAt: 1,
+  });
+  ledger.upsertAgentTask({
+    taskId: 't-revise',
+    runId: 'run-uncommitted',
+    projectId: p.id,
+    kind: 'revise_storyboard',
+    status: 'completed',
+    ownerRoleId: 'storyboard',
+    capability: 'revise_storyboard',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: 'modified',
+    reason: '修订',
+    verificationAuthor: '',
+    commitCount: 2, // predicted save #2 — which never happened
+    updatedAt: 2,
+  });
+  ledger.upsertAgentTask({
+    taskId: 't-verify',
+    runId: 'run-uncommitted',
+    projectId: p.id,
+    kind: 'verify_storyboard',
+    status: 'verification',
+    ownerRoleId: 'storyboard',
+    capability: 'verify_storyboard',
+    dependsOn: 't-revise',
+    inputRevision: 1,
+    outcome: '',
+    reason: '复核',
+    verificationAuthor: 'storyboard',
+    commitCount: 2,
+    updatedAt: 2,
+  });
+  reconcileRunTasks(run, p);
+  const revise = run.tasks!.find((t) => t.id === 't-revise')!;
+  const verify = run.tasks!.find((t) => t.id === 't-verify')!;
+  assert.equal(revise.status, 'failed', 'uncommitted completion must surface as failed');
+  assert.equal(revise.result, undefined);
+  assert.equal(verify.status, 'failed');
+  // The blocked verify never becomes runnable: no ready, no waiting.
+  const scheduled = nextScheduledTask(run, defaultAgents());
+  assert.equal(scheduled.kind, 'idle');
+});
+
+void test('a committed completion is restored intact and its verify becomes runnable', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'conflict-committed-'));
+  const old = process.env.STUDIO_DATA_DIR;
+  process.env.STUDIO_DATA_DIR = dir;
+  t.after(() => {
+    if (old === undefined) delete process.env.STUDIO_DATA_DIR;
+    else process.env.STUDIO_DATA_DIR = old;
+    closeLedger();
+  });
+  const p = project();
+  const run = createAutoRun(p, '任务');
+  run.id = 'run-committed';
+  const ledger = openLedger();
+  ledger.upsertAgentRun({
+    runId: 'run-committed',
+    projectId: p.id,
+    status: 'running',
+    steps: 1,
+    maxSteps: 4,
+    instruction: '任务',
+    summary: '',
+    commitCount: 2, // the save after the revise DID happen
+    committedFingerprint: '',
+    updatedAt: 2,
+  });
+  ledger.upsertAgentTask({
+    taskId: 't-revise',
+    runId: 'run-committed',
+    projectId: p.id,
+    kind: 'revise_storyboard',
+    status: 'completed',
+    ownerRoleId: 'storyboard',
+    capability: 'revise_storyboard',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: 'modified',
+    reason: '修订',
+    verificationAuthor: '',
+    commitCount: 2,
+    updatedAt: 2,
+  });
+  ledger.upsertAgentTask({
+    taskId: 't-verify',
+    runId: 'run-committed',
+    projectId: p.id,
+    kind: 'verify_storyboard',
+    status: 'verification',
+    ownerRoleId: 'storyboard',
+    capability: 'verify_storyboard',
+    dependsOn: 't-revise',
+    inputRevision: 1,
+    outcome: '',
+    reason: '复核',
+    verificationAuthor: 'storyboard',
+    commitCount: 2,
+    updatedAt: 2,
+  });
+  reconcileRunTasks(run, p);
+  assert.equal(run.tasks!.find((t) => t.id === 't-revise')!.status, 'completed');
+  const scheduled = nextScheduledTask(run, defaultAgents());
+  assert.equal(scheduled.kind, 'ready');
+});
+
+void test('the JSONL backend collapses per-task history into one latest state', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'jsonl-semantics-'));
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LEDGER_BACKEND: process.env.LEDGER_BACKEND,
+  };
+  Object.assign(process.env, { STUDIO_DATA_DIR: dir, LEDGER_BACKEND: 'jsonl' });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    closeLedger();
+  });
+  const ledger = openLedger();
+  assert.equal(ledger.backend, 'jsonl');
+  const row = (status: string, updatedAt: number) => ({
+    taskId: 't-jsonl',
+    runId: 'run-jsonl',
+    projectId: 'p-jsonl',
+    kind: 'review',
+    status,
+    ownerRoleId: 'reviewer',
+    capability: 'review_qa',
+    dependsOn: '',
+    inputRevision: 1,
+    outcome: status === 'completed' ? 'reviewed' : '',
+    reason: '审查',
+    verificationAuthor: '',
+    commitCount: 1,
+    updatedAt,
+  });
+  ledger.upsertAgentTask(row('pending', 1));
+  ledger.upsertAgentTask(row('running', 2));
+  ledger.upsertAgentTask(row('completed', 3));
+  const rows = ledger.agentTasks('run-jsonl');
+  assert.equal(rows.length, 1, 'one task id must yield one latest row');
+  assert.equal(rows[0].status, 'completed');
 });
 
 void test('pricing estimates are deterministic and configurable', () => {

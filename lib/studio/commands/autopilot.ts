@@ -11,6 +11,8 @@ import {
 import { assetRequirement } from '../asset-policy.ts';
 import { validateAgentConfig } from '../team-config.ts';
 import { text } from '../domain.ts';
+import { contentFingerprint } from '../auto-progress.ts';
+import { safely } from '../durable/ledger.ts';
 import { bump, studioRoot } from './shared.ts';
 import type { CommandHandler } from './shared.ts';
 
@@ -80,6 +82,12 @@ export const autoCommandHandler: CommandHandler = {
       }
       bump(p!);
       await save();
+      // The commit boundary: only a successful project save makes the run's
+      // step results durable. Reconciliation compares task commit predictions
+      // against this counter to detect results that never reached disk.
+      safely((ledger) =>
+        ledger.markRunCommitted(g.autoRun?.id ?? '', contentFingerprint(p!)),
+      );
       return p;
     },
 };

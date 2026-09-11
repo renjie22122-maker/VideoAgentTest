@@ -68,14 +68,16 @@ const results = [];
     respond(calls === 0 ? { shots: changed } : { summary: '复核未见待修问题', findings: [] });
   p.production.autoRun = createAutoRun(p, '修订分镜', 1);
   await autoStep(p, { roleId: 'storyboard', action: 'revise_shots', reason: '补充动作过渡' });
-  const firstRunTasks = p.production.autoRun.tasks ?? [];
   p.production.autoRun = createAutoRun(p, '继续复核');
   syncVerificationTask(p.production.autoRun, p);
   await autoStep(p, { roleId: 'producer', action: 'stop', reason: '想直接结束' });
+  const finalTasks = p.production.autoRun.tasks ?? [];
   results.push({
     scenario: 'revise-verify-gate',
     llmCalls: calls,
-    verificationRan: firstRunTasks.some((t) => t.kind === 'verify_storyboard'),
+    reviseCompleted: finalTasks.some((t) => t.kind === 'revise_storyboard' && t.status === 'completed'),
+    // Derived from the task RESULT, not mere existence.
+    verificationCompleted: finalTasks.some((t) => t.kind === 'verify_storyboard' && t.status === 'completed'),
     gateClosed: p.production.autoRun.pendingReview === undefined,
     finalStatus: p.production.autoRun.status,
     costEstimatedUsd: costSummary(p).spentEstimated,
@@ -91,9 +93,12 @@ const results = [];
   p.production.scriptApproved = true;
   p.production.assets = { bible: p.plan.bible, seed: 42, locked: false };
   calls = 0;
-  globalThis.fetch = async () =>
-    respond(
-      calls === 0
+  let supervisorCalls = 0;
+  globalThis.fetch = async () => {
+    const isSupervisor = calls === 0;
+    if (isSupervisor) supervisorCalls++;
+    return respond(
+      isSupervisor
         ? {
             roleId: 'reviewer',
             action: 'review',
@@ -105,6 +110,7 @@ const results = [];
           }
         : { summary: '未见新增问题', findings: [] },
     );
+  };
   p.production.autoRun = createAutoRun(p, '会审计划', 4);
   await autoStep(p);
   await autoStep(p);
@@ -113,10 +119,9 @@ const results = [];
   results.push({
     scenario: 'planned-follow-ups',
     llmCalls: calls,
-    supervisorCalls: 1,
-    plannedTasks: tasks.filter((t) => t.ownerRoleId === 'continuity' || t.ownerRoleId === '' || t.ownerRoleId === 'producer').length,
+    supervisorCalls,
     completedTasks: tasks.filter((t) => t.status === 'completed').length,
-    roleIdlessRouted: tasks.some((t) => t.status === 'completed' && t.ownerRoleId !== 'reviewer' && t.ownerRoleId !== 'continuity'),
+    roleIdlessRouted: tasks.some((t) => t.status === 'completed' && t.ownerRoleId === 'producer'),
     finalStatus: p.production.autoRun.status,
     costEstimatedUsd: costSummary(p).spentEstimated,
   });
