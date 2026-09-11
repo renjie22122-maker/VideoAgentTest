@@ -55,7 +55,7 @@ void test('visual findings parser enforces timestamped, actionable evidence', ()
   assert.throws(() => parseVisualFindings(Array.from({ length: 11 }, () => ({ code: 'x', severity: 'info', timestamp: 1, suggestion: '修' })), 10), /格式无效/);
 });
 
-void test('the visual review request carries frames, criteria and idempotency', () => {
+void test('the visual review request carries frames, criteria, references and windows', async () => {
   const p = project();
   p.plan = demoPlan(p);
   const j = job(p);
@@ -63,13 +63,16 @@ void test('the visual review request carries frames, criteria and idempotency', 
     { path: '/tmp/f0.png', timestampSec: 1.2, dataUrl: 'data:image/png;base64,QUJD' },
     { path: '/tmp/f1.png', timestampSec: 2.4, dataUrl: 'data:image/png;base64,REVG' },
   ];
-  const request = buildVisualReviewRequest(p, j, frames);
+  const request = await buildVisualReviewRequest(p, j, frames);
   const requestFrames = request.frames as { timestampSec: number; dataUrl: string }[];
   assert.equal(request.idempotencyKey, 'job-vqa-qa-frames');
   assert.equal(requestFrames.length, 2);
   assert.equal(requestFrames[0].timestampSec, 1.2);
   assert.ok(String(requestFrames[0].dataUrl).startsWith('data:image/png;base64,'));
-  assert.deepEqual(request.criteria, ['identity', 'wardrobe', 'limbs', 'action_match', 'camera_motion', 'temporal_continuity']);
+  assert.deepEqual(request.criteria, ['identity', 'wardrobe', 'limbs', 'action_match', 'camera_motion', 'temporal_continuity', 'lip_sync']);
+  assert.equal(request.previousShot, null, 'first shot has no narrative predecessor');
+  assert.ok(Array.isArray(request.referenceImages));
+  assert.ok(Array.isArray(request.performanceWindows));
 });
 
 void test('frame review posts frames to the gateway and parses findings', async (t) => {

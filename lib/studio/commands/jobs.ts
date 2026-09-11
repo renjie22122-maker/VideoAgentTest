@@ -280,7 +280,9 @@ export async function reviewForJob(
     return reviewMedia(p, j);
   try {
     const dir = await mkdtemp(path.join(tmpdir(), 'vqa-'));
-    const frames = await sampleVideoFrames(j.outputUrl, dir, 3);
+    const count = Number(process.env.VISUAL_QA_FRAME_COUNT ?? 5);
+    const width = Number(process.env.VISUAL_QA_FRAME_WIDTH ?? 720);
+    const frames = await sampleVideoFrames(j.outputUrl, dir, count, width);
     return await reviewMediaFrames(p, j, frames);
   } catch {
     // Frame sampling is best-effort: fall back to the URL contract.

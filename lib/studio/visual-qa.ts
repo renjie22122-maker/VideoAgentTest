@@ -2,6 +2,9 @@ import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { runFFmpeg } from './take-media.ts';
 import { text } from './domain.ts';
+import { previousNarrativeShot } from './narrative.ts';
+import { assetReferences } from './assets.ts';
+import { readImage } from './openai-images.ts';
 import type { Project, Job } from './types.ts';
 import { productionSkills } from './skills.ts';
 
@@ -11,9 +14,11 @@ import { productionSkills } from './skills.ts';
  *   generated video → frame sampling (FFmpeg) → multimodal review request
  *   → structured findings → corrective regeneration decision.
  *
- * The review gateway receives frames (data URLs) instead of — or in addition
- * to — the video URL; a text finding without frame evidence can never claim
- * to be a verified visual defect, so every finding references a timestamp.
+ * Sampling depth is configurable: VISUAL_QA_FRAME_COUNT (default 5) and
+ * VISUAL_QA_FRAME_WIDTH (default 720). The review request carries the
+ * NARRATIVE predecessor (not just the playback predecessor), approved asset
+ * reference images, and dialogue performance windows so short glitches,
+ * identity and lip-sync can be checked against evidence.
  */
 export type VisualFinding = {
   code: string;
@@ -65,7 +70,8 @@ export async function probeDurationSeconds(source: string): Promise<number> {
 export async function sampleVideoFrames(
   source: string,
   outDir: string,
-  count = 3,
+  count = Number(process.env.VISUAL_QA_FRAME_COUNT ?? 5),
+  width = Number(process.env.VISUAL_QA_FRAME_WIDTH ?? 720),
 ): Promise<SampledFrame[]> {
   await mkdir(outDir, { recursive: true });
   const duration = await probeDurationSeconds(source);
@@ -84,7 +90,7 @@ export async function sampleVideoFrames(
       '-frames:v',
       '1',
       '-vf',
-      'scale=480:-2',
+      'scale=' + Math.max(64, Math.min(1920, Math.round(width))) + ':-2',
       '-y',
       framePath,
     ]);
@@ -98,18 +104,34 @@ export async function sampleVideoFrames(
   return frames;
 }
 
-export function buildVisualReviewRequest(
+export async function buildVisualReviewRequest(
   p: Project,
   j: Job,
   frames: SampledFrame[],
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const shot = p.plan?.shots.find((s) => s.id === j.shotId);
   const index = p.plan?.shots.findIndex((s) => s.id === j.shotId) ?? -1;
-  const previous = index > 0 ? (p.plan?.shots[index - 1] ?? null) : null;
+  // The NARRATIVE predecessor — cross-cutting timelines must not confuse
+  // threads with the playback-order neighbor.
+  const previous = index >= 0 ? (previousNarrativeShot(p.plan!.shots, index) ?? null) : null;
+  // Approved asset reference images: local ones become data URLs, remote stay HTTPS.
+  const referenceImages: string[] = [];
+  for (const url of assetReferences(p, j.shotId).slice(0, 9)) {
+    const match = /^\/api\/studio-images\/([a-f0-9-]{36})\.(png|jpg|webp)$/.exec(url);
+    referenceImages.push(
+      match
+        ? 'data:image/' +
+            (match[2] === 'jpg' ? 'jpeg' : match[2]) +
+            ';base64,' +
+            (await readImage(match[1], match[2])).toString('base64')
+        : url,
+    );
+  }
   return {
     instructions:
       '逐帧核查人物身份、服装、肢体、动作匹配、相机运动与跨镜时间连续性。' +
-      '结论必须引用具体帧时间戳；没有帧证据的缺陷不得上报为视觉错误。',
+      '结论必须引用具体帧时间戳；没有帧证据的缺陷不得上报为视觉错误。' +
+      '声音与口型连续性仅当评测服务具备音频/多模态能力时核查，否则注明未核查。',
     skillVersion: productionSkills.reviewer.version,
     frames: frames.map((frame) => ({
       timestampSec: frame.timestampSec,
@@ -117,7 +139,18 @@ export function buildVisualReviewRequest(
     })),
     shot,
     bible: p.plan?.bible,
-    previousShot: previous,
+    previousShot: previous
+      ? { id: previous.id, videoUrl: previous.videoUrl ?? null, description: previous.description, endState: previous.endState }
+      : null,
+    referenceImages,
+    performanceWindows: (shot?.performance ?? []).map((line) => ({
+      start: line.start,
+      end: line.end,
+      characterId: line.characterId,
+      text: line.text,
+      mode: line.mode,
+    })),
+    soundCues: shot?.soundCues ?? [],
     criteria: [
       'identity',
       'wardrobe',
@@ -125,6 +158,7 @@ export function buildVisualReviewRequest(
       'action_match',
       'camera_motion',
       'temporal_continuity',
+      'lip_sync',
     ],
     idempotencyKey: j.id + '-qa-frames',
   };

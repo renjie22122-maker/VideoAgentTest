@@ -149,6 +149,35 @@ void test('refused repetition and failed workers leave faithful task records', a
   assert.equal(live.production!.autoRun!.steps, 1);
 });
 
+void test('targeted revision preserves untouched shots and invalidates only the affected suffix', async (t) => {
+  const p = liveStoryboard(project(), t, 'https://task-targeted.invalid');
+  const changed = withIntent(p.plan!.shots, p.production!.script!);
+  p.plan!.shots[0].referenceUrl = '/api/studio-images/00000000-0000-4000-8000-000000000001.png';
+  p.plan!.shots[0].referenceMode = 'live';
+  p.plan!.shots[1].referenceUrl = '/api/studio-images/00000000-0000-4000-8000-000000000002.png';
+  p.plan!.shots[1].referenceMode = 'live';
+  const originalShot0 = structuredClone(p.plan!.shots[0]);
+  const modelChanged = structuredClone(changed);
+  modelChanged[0].description += ' 模型试图改动第 1 镜（应被保留）。';
+  modelChanged[1].description += ' 主角先站稳，再转身。';
+  t.mock.method(globalThis, 'fetch', async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ shots: modelChanged }) } }] })),
+  );
+  p.production!.autoRun = createAutoRun(p, '定向修订', 1);
+  await autoStep(p, { roleId: 'storyboard', action: 'revise_shots', reason: '只修 shot-2', targets: ['shot-2'] });
+  const plan = p.plan!;
+  assert.equal(plan.shots[0].description, originalShot0.description, 'untargeted shot must stay untouched');
+  assert.equal(plan.shots[0].referenceUrl, originalShot0.referenceUrl, 'untargeted media must survive');
+  assert.ok(plan.shots[1].description.includes('先站稳'), 'targeted shot receives the revision');
+  assert.equal(plan.shots[1].referenceUrl, undefined, 'affected suffix loses its media');
+  assert.equal(p.revision, 2);
+  const events = p.production!.artifactEvents!;
+  assert.ok(events.length >= 1);
+  const affected = events.at(-1)!.affected.map((r) => r.kind + ':' + r.id);
+  assert.ok(!affected.includes('shot:shot-1'), 'invalidation starts at the first changed shot');
+  assert.ok(p.production!.autoRun!.pendingReview);
+});
+
 void test('stop claims are recorded as tasks and cannot hide unresolved findings', async () => {
   const p = project();
   p.plan = demoPlan(p);

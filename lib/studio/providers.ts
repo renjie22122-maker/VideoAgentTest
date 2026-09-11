@@ -179,7 +179,7 @@ export async function reviewMedia(p:Project,j:Job):Promise<{verdict:'passed'|'re
 export async function reviewMediaFrames(p: Project, j: Job, frames: SampledFrame[]): Promise<{verdict:'passed'|'rejected';notes:string;source:'vision';findings:VisualFinding[]}|null>{
   if(j.kind!=='video')return null;
   if(!setting('QA_GATEWAY_URL')||!setting('QA_API_KEY'))return null;
-  const requestBody = buildVisualReviewRequest(p, j, frames);
+  const requestBody = await buildVisualReviewRequest(p, j, frames);
   const result=await request(setting('QA_GATEWAY_URL').replace(/\/$/,'')+'/review',requestBody,setting('QA_API_KEY'));
   if(result.verdict!=='passed'&&result.verdict!=='rejected')throw new Error('视觉审查网关返回结论无效。');
   const findings=parseVisualFindings(result.findings??[],p.plan!.shots.find(s=>s.id===j.shotId)?.duration??0);

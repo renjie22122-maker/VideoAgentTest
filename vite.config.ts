@@ -47,7 +47,14 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
-    server: { host: '127.0.0.1', ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}) },
+    server: {
+      host: '127.0.0.1',
+      watch: {
+        // Editor atomic-rename temp dirs must never enter the watcher.
+        ignored: ['**/.*.tmpdir/**'],
+        ...(isCodexSeatbeltSandbox ? { useFsEvents: false, usePolling: true } : {}),
+      },
+    },
     plugins: [
       { name: 'frame-local-api', configureServer(server: ViteDevServer) { server.middlewares.use(studioMiddleware); startBackgroundWorker(); } },
       vinext(),
