@@ -81,7 +81,10 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
       return;
     }
     decision = scheduled.decision;
-    requiredReview = scheduled.decision;
+    // Verification semantics apply ONLY to the verification gate. A plain
+    // scheduled review/write/design must never close the whole run.
+    requiredReview =
+      scheduled.task.kind === 'verify_storyboard' ? scheduled.decision : undefined;
     scheduledTask = scheduled.task;
   } else if (scheduled.kind === 'blocked') {
     // Work exists but its dependency forbids it. Do NOT fall back to the

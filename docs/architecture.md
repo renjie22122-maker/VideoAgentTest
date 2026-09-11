@@ -65,8 +65,9 @@ beginStep/finish   RunController       步骤记账、指纹去重、预算耗�
 创作状态仍由 `projects.json` 原子文件承载；**执行状态**由 `lib/studio/durable/ledger.ts` 持久化（runs / tasks / generation_jobs / usage_records），Node ≥ 23.4 用内建 node:sqlite，旧运行时自动降级为等价 JSONL。关键语义：
 
 - 任务/运行在 beginStep / finishStep 同步写入，账本故障不阻断命令（`safely()`）。
-- 生成任务的 `submission`（unsent / submitted / unknown）是持久化提交边界：**结果未知的付费提交永不重发**；本地崩溃后，未发送的工作按租约（`leaseExpiresAt`）重排，已提交的按账本中的 provider job id 继续查询；`fal-pending` 标记可被账本真实 ID 接管。
-- 成本台账：LLM 与媒体提交双入口按文档化估算记录，projects.json 保留有界镜像，Observation 注入 `costSummary` 供预算感知规划。估算不是发票，真实费率可用环境变量配置。
+- 生成任务的 `submission`（unsent / submitted / unknown）是持久化提交边界：**结果未知的付费提交永不重发**；本地崩溃后，未发送的工作按租约（`leaseExpiresAt`）重排，已提交的按账本中的 provider job id 继续查询；`fal-pending` 标记可被账本真实 ID 接管。**恢复顺序固定：先对账后租约**——账本确认的 ID 先合并进当前状态，旧 unknown/空状态不得覆盖（UPSERT 防降级）；首次提交与恢复共用同一 `submitJob` 入口，提交前检查点是契约而非可选参数。
+- 成本台账：LLM 与媒体提交双入口按文档化估算记录，`observation.projectId` 沿 `roleJSON` 全链传递归属，projects.json 保留有界镜像，`costSummary` 以账本累计为准（不随镜像截断减少）、估算按 4 位小数取整。估算不是发票，真实费率可用环境变量配置。
+- 任务在物化/创建时即写入账本（含 reason 与复核作者），重启后 pending / running / failed / 待复核均可识别；多步计划由 Scheduler 按依赖顺序执行，普通会审不终止整轮，省略岗位的条目按动作能力条件路由。
 
 ## 扩展语言服务
 

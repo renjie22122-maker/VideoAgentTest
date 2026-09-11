@@ -396,6 +396,7 @@ export const pollHandler: CommandHandler = {
               ? '演示规则运行完成，尚未进行像素级视觉审查。请人工确认分镜节奏。'
               : '真实素材待人工审查；未配置视觉审查网关时，不自动判断画面质量。'),
           attempt: previous?.attempt ?? 0,
+          at: previous?.at ?? Date.now(),
         };
       });
       transition(p!, 'qa', '素材已就绪，等待审片；不将规则检查作为视觉质量结论。');

@@ -35,6 +35,8 @@ export type AgentTaskRow = {
   dependsOn: string;
   inputRevision: number;
   outcome: string;
+  reason: string;
+  verificationAuthor: string;
   updatedAt: number;
 };
 
@@ -93,7 +95,7 @@ CREATE TABLE IF NOT EXISTS agent_runs(
 CREATE TABLE IF NOT EXISTS agent_tasks(
   task_id TEXT PRIMARY KEY, run_id TEXT, project_id TEXT, kind TEXT, status TEXT,
   owner_role_id TEXT, capability TEXT, depends_on TEXT, input_revision INTEGER,
-  outcome TEXT, updated_at INTEGER);
+  outcome TEXT, reason TEXT, verification_author TEXT, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON agent_tasks(run_id);
 CREATE TABLE IF NOT EXISTS generation_jobs(
   job_id TEXT PRIMARY KEY, project_id TEXT, shot_id TEXT, kind TEXT, status TEXT,
@@ -110,6 +112,12 @@ function sqliteLedger(dbPath: string): Ledger {
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new sqliteModule!.DatabaseSync(dbPath);
   db.exec(SCHEMA);
+  // Column migration for DBs created before the reason/verification columns.
+  const columns = db.prepare('PRAGMA table_info(agent_tasks)').all() as { name: string }[];
+  if (!columns.some((c) => c.name === 'reason'))
+    db.exec("ALTER TABLE agent_tasks ADD COLUMN reason TEXT DEFAULT ''");
+  if (!columns.some((c) => c.name === 'verification_author'))
+    db.exec("ALTER TABLE agent_tasks ADD COLUMN verification_author TEXT DEFAULT ''");
   return {
     backend: 'sqlite',
     upsertAgentRun(row) {
@@ -125,17 +133,33 @@ function sqliteLedger(dbPath: string): Ledger {
     },
     upsertAgentTask(row) {
       db.prepare(
-        `INSERT INTO agent_tasks(task_id,run_id,project_id,kind,status,owner_role_id,capability,depends_on,input_revision,outcome,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO agent_tasks(task_id,run_id,project_id,kind,status,owner_role_id,capability,depends_on,input_revision,outcome,reason,verification_author,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(task_id) DO UPDATE SET status=excluded.status, outcome=excluded.outcome,
            updated_at=excluded.updated_at`,
       ).run(
         row.taskId, row.runId, row.projectId, row.kind, row.status, row.ownerRoleId,
         row.capability, row.dependsOn.slice(0, 2000), row.inputRevision,
-        row.outcome.slice(0, 200), row.updatedAt,
+        row.outcome.slice(0, 200), row.reason.slice(0, 1500), row.verificationAuthor.slice(0, 100),
+        row.updatedAt,
       );
     },
     upsertGenerationJob(row) {
+      // A confirmed submission must never be downgraded by an unknown/empty
+      // state arriving later (e.g. an expired lease path rewriting the row).
+      const existing = db
+        .prepare(`SELECT * FROM generation_jobs WHERE job_id = ?`)
+        .get(row.jobId) as Record<string, unknown> | undefined;
+      let submission = row.submission;
+      let providerJobId = row.providerJobId;
+      if (existing) {
+        const storedSubmission = str(existing.submission, 'unsent');
+        const storedProvider = str(existing.provider_job_id ?? existing.providerJobId);
+        if (storedSubmission === 'submitted') {
+          if (submission !== 'submitted') submission = storedSubmission;
+          if (!providerJobId && storedProvider) providerJobId = storedProvider;
+        }
+      }
       db.prepare(
         `INSERT INTO generation_jobs(job_id,project_id,shot_id,kind,status,submission,provider_job_id,lease_expires_at,attempt,created_at,updated_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?)
@@ -143,8 +167,8 @@ function sqliteLedger(dbPath: string): Ledger {
            provider_job_id=excluded.provider_job_id, lease_expires_at=excluded.lease_expires_at,
            attempt=excluded.attempt, updated_at=excluded.updated_at`,
       ).run(
-        row.jobId, row.projectId, row.shotId, row.kind, row.status, row.submission,
-        row.providerJobId, row.leaseExpiresAt, row.attempt, row.createdAt, row.updatedAt,
+        row.jobId, row.projectId, row.shotId, row.kind, row.status, submission,
+        providerJobId, row.leaseExpiresAt, row.attempt, row.createdAt, row.updatedAt,
       );
     },
     recordUsage(row) {
@@ -213,7 +237,19 @@ function jsonlLedger(dbPath: string): Ledger {
     },
     upsertGenerationJob(row) {
       const previous = latestOf<JsonlRow & { seq: number }>('job', 'jobId', row.jobId);
-      append('job', { ...row, seq: (previous?.seq ?? 0) + 1 });
+      let submission = row.submission;
+      let providerJobId = row.providerJobId;
+      if (previous && previous.submission === 'submitted') {
+        if (submission !== 'submitted') submission = String(previous.submission);
+        if (!providerJobId && typeof previous.providerJobId === 'string' && previous.providerJobId)
+          providerJobId = previous.providerJobId;
+      }
+      append('job', {
+        ...row,
+        submission,
+        providerJobId,
+        seq: (previous?.seq ?? 0) + 1,
+      });
     },
     recordUsage(row) {
       append('usage', row);
@@ -268,6 +304,8 @@ function toTaskRow(row: Record<string, unknown>): AgentTaskRow {
     dependsOn: str(row.depends_on ?? row.dependsOn),
     inputRevision: num(row.input_revision ?? row.inputRevision),
     outcome: str(row.outcome),
+    reason: str(row.reason),
+    verificationAuthor: str(row.verification_author ?? row.verificationAuthor),
     updatedAt: num(row.updated_at ?? row.updatedAt),
   };
 }

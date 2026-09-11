@@ -2,6 +2,28 @@ import type { AutoRun, PendingAutoReview } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import type { AutoDecision } from './planner.ts';
 import type { CapabilityId } from './capabilities.ts';
+import { safely } from '../durable/ledger.ts';
+
+/** Persist a task at creation time: pending work is durable before it runs. */
+function persistTask(task: AgentTask, run: AutoRun, p: Project) {
+  safely((ledger) =>
+    ledger.upsertAgentTask({
+      taskId: task.id,
+      runId: run.id ?? '',
+      projectId: p.id,
+      kind: task.kind,
+      status: task.status,
+      ownerRoleId: task.ownerRoleId,
+      capability: task.capability ?? '',
+      dependsOn: task.dependsOn.join(','),
+      inputRevision: task.inputVersions.revision,
+      outcome: task.result?.outcome ?? '',
+      reason: task.reason,
+      verificationAuthor: task.verification?.authorRoleId ?? '',
+      updatedAt: task.updatedAt,
+    }),
+  );
+}
 
 /**
  * AgentTask: first-class unit of agent work.
@@ -105,6 +127,7 @@ export function materializeDecisionTask(
   };
   list.push(task);
   if (list.length > 200) list.splice(0, list.length - 200);
+  persistTask(task, run, p);
   return task;
 }
 
@@ -142,6 +165,7 @@ export function materializePlanTasks(
     };
     list.push(task);
     created.push(task);
+    persistTask(task, run, p);
     previous = task.id;
   }
   if (list.length > 200) list.splice(0, list.length - 200);
@@ -193,5 +217,6 @@ export function syncVerificationTask(run: AutoRun, p: Project): AgentTask | unde
   };
   list.push(task);
   if (list.length > 200) list.splice(0, list.length - 200);
+  persistTask(task, run, p);
   return task;
 }

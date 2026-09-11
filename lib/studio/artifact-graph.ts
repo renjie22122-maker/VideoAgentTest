@@ -62,7 +62,7 @@ export function buildArtifactGraph(p: Project): ArtifactGraph {
       addNode(
         { id: shot.id, kind: 'prompt' },
         'current',
-        { version: promptEntry.revision },
+        { version: promptEntry.revision, producedAt: promptEntry.compiledAt },
       );
       addDep({ id: shot.id, kind: 'prompt' }, { id: shot.id, kind: 'shot' }, 'compiled_from');
     }
@@ -92,7 +92,7 @@ export function buildArtifactGraph(p: Project): ArtifactGraph {
       addNode(
         { id: shot.id, kind: 'qa' },
         'current',
-        { version: qaEntry.attempt + 1 },
+        { version: qaEntry.attempt + 1, producedAt: qaEntry.at },
       );
       addDep({ id: shot.id, kind: 'qa' }, { id: shot.id, kind: 'video' }, 'reviewed_by');
     }

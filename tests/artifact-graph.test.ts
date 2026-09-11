@@ -176,6 +176,32 @@ void test('artifact nodes carry version identity where evidence exists', () => {
   assert.equal(node('qa', 'shot-1').version, 1);
 });
 
+void test('recompiled prompts and re-reviewed qa after the affecting event are current', () => {
+  const p = project();
+  const eventAt = 1000;
+  recordInvalidation(p, [{ id: 'asset-renata', kind: 'asset' }], []);
+  p.production!.artifactEvents![0].at = eventAt;
+  // Recompiled prompt with production evidence after the event.
+  p.production!.prompts![0].compiledAt = eventAt + 100;
+  // Re-generated video and re-reviewed qa after the event.
+  p.jobs.push({
+    id: 'job-regenerated',
+    shotId: 'shot-1',
+    kind: 'video',
+    status: 'succeeded',
+    mode: 'demo',
+    revision: p.revision,
+    createdAt: 0,
+    finishedAt: eventAt + 200,
+  });
+  p.production!.qa[0].at = eventAt + 300;
+  const manifest = artifactManifest(p);
+  const byKey = new Map(manifest.map((n) => [n.ref.kind + ':' + n.ref.id, n.status]));
+  assert.equal(byKey.get('prompt:shot-1'), 'current');
+  assert.equal(byKey.get('video:shot-1'), 'current');
+  assert.equal(byKey.get('qa:shot-1'), 'current');
+});
+
 void test('a video regenerated after the affecting event is current, not stale', () => {
   const p = project();
   const eventAt = 1000;

@@ -36,6 +36,8 @@ function persistTask(task: AgentTask, run: AutoRun, p: Project, outcome = '') {
       dependsOn: task.dependsOn.join(','),
       inputRevision: task.inputVersions.revision,
       outcome,
+      reason: task.reason,
+      verificationAuthor: task.verification?.authorRoleId ?? '',
       updatedAt: task.updatedAt,
     }),
   );

@@ -213,6 +213,61 @@ void test('a verifier without review capability is never executed through the sc
   assert.equal(p.production!.autoRun!.pendingReview!.authorRoleId, 'storyboard');
 });
 
+void test('a plain scheduled review never completes the run while accepted work remains', async (t) => {
+  const p = project();
+  p.mode = 'live';
+  p.plan = demoPlan(p);
+  p.production!.script = demoScreenplay(p);
+  p.production!.scriptApproved = true;
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: false };
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-plain-' + Date.now()),
+    LLM_BASE_URL: 'https://scheduler-plain.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    const content = calls === 1
+      ? JSON.stringify({
+          roleId: 'reviewer',
+          action: 'review',
+          reason: '初审',
+          // The second entry omits roleId: routing must resolve it by capability.
+          plan: [{ action: 'review', reason: '复审' }],
+        })
+      : JSON.stringify({ summary: '未见新增问题', findings: [] });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+  });
+  p.production!.autoRun = createAutoRun(p, '会审计划', 4);
+  await autoStep(p);
+  assert.equal(calls, 2);
+  const run = p.production!.autoRun!;
+  // The plain first review must NOT have completed the run: accepted work remains.
+  assert.equal(run.status, 'running');
+  const planTask = run.tasks!.find((task) => task.ownerRoleId === '')!;
+  assert.equal(planTask.status, 'pending');
+  // Step 2: the roleId-less plan entry routes by capability requirement.
+  await autoStep(p);
+  assert.equal(calls, 3, 'the routed follow-up review runs with no additional supervisor call');
+  const done = run.tasks!.find((task) => task.id === planTask.id)!;
+  assert.equal(done.status, 'completed');
+  assert.equal(done.ownerRoleId, 'producer', 'routed to the first enabled role granting a review capability');
+  assert.equal(run.steps, 2);
+});
+
 void test('a supervisor follow-up plan runs through the scheduler without another planner call', async (t) => {
   const p = project();
   p.mode = 'live';

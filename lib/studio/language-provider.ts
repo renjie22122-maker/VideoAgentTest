@@ -89,13 +89,14 @@ export function languageResponseText(raw:unknown,protocol:LanguageProtocol):stri
   if(!cleaned)throw new LanguageProviderError('empty','语言模型仅返回了思考内容，没有最终结果。');
   return cleaned;
 }
-export async function languageText(messages:readonly LanguageMessage[],options:{model?:string}={}):Promise<string>{
+export async function languageText(messages:readonly LanguageMessage[],options:{model?:string;projectId?:string}={}):Promise<string>{
   const config=languageConfig();if(options.model)config.model=options.model;
   const wire=buildLanguageRequest(messages,config);
   // Cost ledger: blended estimate from prompt length (documented estimate).
+  // projectId attributes the spend to a project when the caller provides it.
   safely((ledger)=>ledger.recordUsage({
     id: globalThis.crypto.randomUUID(),
-    projectId: '',
+    projectId: options.projectId ?? '',
     category: 'llm',
     provider: config.provider,
     model: config.model,

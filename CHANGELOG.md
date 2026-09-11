@@ -1,5 +1,22 @@
 # 更新记录
 
+## 2026-09-14 · 恢复语义与计划语义收敛：无重复提交、无提前完成、无错误归属
+
+按第五轮评审把执行链上的状态转换、持久化时机和恢复顺序做一致。
+
+### 修复
+
+- **统一付费提交入口**（`commands/jobs.ts`）：首次提交与崩溃恢复共用 `submitJob`，提交前检查点成为契约而非可选参数——准备校验 → 持久状态确认 → 检查点落盘 → 发送 → 远端 ID 落盘；`unknown` 状态永不重发，`submitted` 缺失 ID 视为异常而非重试。
+- **先对账、后租约**：账本中已确认的 provider ID 在租约处理前合并进当前状态；旧 unknown/空状态不再覆盖 submitted/已知 ID（SQLite/JSONL 双后端 UPSERT 防降级）。租约过期只表示本地工作者死亡，绝不使远端任务失效。
+- **多步计划语义**：`requiredReview` 仅对 `verify_storyboard` 任务启用；普通预排会审不再把整轮标为 completed——仍有 pending 任务时继续执行；`plan` 条目省略 `roleId` 时按动作的完整 `capabilityRequirement`（anyOf/allOf）路由，不再进入 waiting 死路。
+- **任务最小恢复闭环**：决策物化、后续计划与 verify 任务创建时即写入持久账本（新增 reason / verification_author 列，旧库自动 ALTER 兼容），重启后 pending/running/failed/待复核状态可识别。
+- **产物与成本数据源**：Prompt 记录 `compiledAt`、QA 记录 `at` 作为 producedAt——重新编译/复审的产物正确标为 current；`observation` 注入 `projectId`，`roleJSON` 全链传递归属，LLM 花费进入项目摘要；`costSummary` 以账本累计为准（不随项目镜像截断减少），估算按 4 位小数取整。
+
+### 文档与验证
+
+- 新增组合回归：租约过期+已知 ID 续查、UPSERT 防降级、普通会审+无 roleId 后续任务、重新编译/复审产物 current、LLM 归属进项目摘要；54 个测试文件、类型检查、代码规范与生产构建全部通过。
+- 架构文档更新提交边界、恢复顺序与成本归属语义。
+
 ## 2026-09-14 · 执行底座五件套：Task-first、Durable Runtime、Generation Queue、Artifact 版本与 Cost Ledger
 
 按评审排序完成基础设施阶段：不再新增抽象，让抽象承担生产负载。

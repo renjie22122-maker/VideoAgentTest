@@ -51,16 +51,23 @@ export const reviewAction: AgentAction = {
         verificationTask.updatedAt = Date.now();
       }
       const remaining = unresolvedFindings(p);
-      if (!remaining.length) {
+      const openTasks = (run.tasks ?? []).filter(
+        (t) => t.status === 'pending' || t.status === 'verification',
+      ).length;
+      if (!remaining.length && !openTasks) {
         run.status = 'completed';
         run.stopReason = 'completed';
         run.summary =
           '分镜修改已完成独立文本复核，本次复核未报告待修问题；生成前仍需用户批准，实际画面尚未验收。';
       } else
         run.summary =
-          '独立文本复核与结构检查仍有 ' +
-          remaining.length +
-          ' 项待处理问题，将在剩余步数内继续协调修订。';
+          remaining.length
+            ? '独立文本复核与结构检查仍有 ' +
+              remaining.length +
+              ' 项待处理问题，将在剩余步数内继续协调修订。'
+            : '独立文本复核通过；仍有 ' +
+              openTasks +
+              ' 项已接受的后续任务，将在剩余步数内继续执行。';
     }
   },
 };

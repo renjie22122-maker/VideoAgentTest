@@ -75,6 +75,40 @@ void test('an LLM call records a documented estimate into the durable ledger', a
   assert.equal(row.jobId, '');
 });
 
+void test('LLM calls with a project context flow into the project budget summary', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'llm-attributed-'));
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: dir,
+    LLM_BASE_URL: 'https://attributed-cost.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test-model',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    closeLedger();
+  });
+  const p = project();
+  t.mock.method(globalThis, 'fetch', async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ok: true }) } }] })),
+  );
+  const { roleJSON } = await import('../lib/studio/providers.ts');
+  // The observation-shaped input carries projectId — the attribution contract.
+  await roleJSON('测试角色', '返回 {ok:true}', { projectId: p.id, idea: '测试' });
+  const summary = costSummary(p);
+  // The project mirror has no entries; the LLM spend comes from the ledger.
+  assert.equal(p.production!.costLedger, undefined);
+  assert.ok(summary.byCategory.llm > 0, 'attributed LLM calls must appear in the project summary');
+  assert.ok(summary.spentEstimated > 0);
+});
+
 void test('video submission estimates flow into the project ledger mirror', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'video-cost-'));
   const old = {

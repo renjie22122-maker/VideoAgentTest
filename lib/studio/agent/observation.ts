@@ -4,6 +4,7 @@ import { currentAutoFindings } from '../auto-run-state.ts';
 import type { AutoRun } from '../auto-run-state.ts';
 import { buildQualityReport } from '../quality-report.ts';
 import { capabilitiesForRole, capabilityLabels } from './capabilities.ts';
+import { safely } from '../durable/ledger.ts';
 import type { Project } from '../types.ts';
 
 /**
@@ -16,6 +17,7 @@ import type { Project } from '../types.ts';
 export function buildObservation(p: Project, run: AutoRun) {
   const roles = projectAgents(p).filter((r) => r.enabled);
   return {
+    projectId: p.id,
     assetPolicy: ASSET_POLICY_GUIDE,
     assetReadiness: assetRequirementManifest(p),
     instruction: run.instruction,
@@ -72,10 +74,28 @@ export function buildObservation(p: Project, run: AutoRun) {
 }
 
 export function costSummary(p: Project) {
-  const entries = p.production?.costLedger ?? [];
+  // The durable ledger is the authoritative running total; the project mirror
+  // is a bounded recent-window view. Merging by id keeps both in one summary.
+  const rows = safely((ledger) => ledger.usage(p.id)) ?? [];
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  for (const entry of p.production?.costLedger ?? []) {
+    if (!byId.has(entry.id))
+      byId.set(entry.id, {
+        id: entry.id,
+        projectId: p.id,
+        category: entry.category,
+        provider: entry.provider,
+        model: entry.model,
+        estimatedCost: entry.estimatedCost,
+        jobId: entry.jobId ?? '',
+        createdAt: entry.at,
+      });
+  }
+  const entries = [...byId.values()];
   const byCategory = { llm: 0, image: 0, video: 0 } as Record<string, number>;
   for (const entry of entries) byCategory[entry.category] += entry.estimatedCost;
-  const round = (value: number) => Math.round(value * 100) / 100;
+  // Estimates can be well under a cent; round to 4 decimals instead of cents.
+  const round = (value: number) => Math.round(value * 10000) / 10000;
   return {
     currency: 'USD',
     spentEstimated: round(entries.reduce((sum, e) => sum + e.estimatedCost, 0)),

@@ -93,6 +93,8 @@ void test('the ledger persists generation job submission boundaries across proce
     dependsOn: '',
     inputRevision: 1,
     outcome: 'reviewed',
+    reason: '审查',
+    verificationAuthor: '',
     updatedAt: 3,
   });
   reopened.recordUsage({
@@ -211,6 +213,105 @@ void test('lease recovery distinguishes unsent from unknown work', async (t) => 
   await tick(p, async () => {});
   assert.equal(unknown.status, 'failed');
   assert.match(unknown.error ?? '', /提交结果未知/);
+});
+
+void test('a known provider id survives an expired lease and an unknown local marker', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'reconcile-lease-'));
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    MEDIA_GATEWAY_URL: process.env.MEDIA_GATEWAY_URL,
+    MEDIA_API_KEY: process.env.MEDIA_API_KEY,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: dir,
+    MEDIA_GATEWAY_URL: 'https://reconcile-gateway.invalid',
+    MEDIA_API_KEY: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    closeLedger();
+  });
+  const p = project();
+  p.mode = 'live';
+  p.plan = demoPlan(p);
+  p.plan.shots[0].videoInput = { mode: 'text' };
+  p.production!.script = demoScreenplay(p);
+  p.production!.scriptApproved = true;
+  const j = job(p, 'job-lease-known', {
+    status: 'running',
+    mode: 'live',
+    startedAt: Date.now() - 1000,
+    remoteId: 'fal-pending',
+    submission: { state: 'unknown' },
+    leaseExpiresAt: 1, // EXPIRED lease
+  });
+  p.jobs = [j];
+  const ledger = openLedger();
+  ledger.upsertGenerationJob({
+    jobId: j.id,
+    projectId: p.id,
+    shotId: j.shotId,
+    kind: 'video',
+    status: 'running',
+    submission: 'submitted',
+    providerJobId: 'provider-known',
+    leaseExpiresAt: 1,
+    attempt: 0,
+    createdAt: j.createdAt,
+    updatedAt: 0,
+  });
+  let polls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    polls++;
+    return new Response(JSON.stringify({ status: 'succeeded', outputUrl: 'https://example.com/known.mp4' }));
+  });
+  await tick(p, async () => {});
+  // Reconciliation happened BEFORE lease handling: the known id is adopted and polled.
+  assert.equal(polls, 1);
+  assert.equal(j.remoteId, 'provider-known');
+  assert.equal(j.status, 'succeeded');
+  assert.equal(j.submission?.state, 'submitted');
+  // The ledger must NOT have been downgraded by the old unknown/empty state.
+  const row = openLedger().generationJob(j.id)!;
+  assert.equal(row.submission, 'submitted');
+  assert.equal(row.providerJobId, 'provider-known');
+});
+
+void test('the ledger never downgrades a confirmed submission', () => {
+  const p = project();
+  const ledger = openLedger();
+  ledger.upsertGenerationJob({
+    jobId: 'job-protected',
+    projectId: p.id,
+    shotId: 'shot-1',
+    kind: 'video',
+    status: 'running',
+    submission: 'submitted',
+    providerJobId: 'provider-42',
+    leaseExpiresAt: 0,
+    attempt: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  // A stale unknown/empty write must not clear the confirmed submission.
+  ledger.upsertGenerationJob({
+    jobId: 'job-protected',
+    projectId: p.id,
+    shotId: 'shot-1',
+    kind: 'video',
+    status: 'failed',
+    submission: 'unknown',
+    providerJobId: '',
+    leaseExpiresAt: 0,
+    attempt: 0,
+    createdAt: 1,
+    updatedAt: 2,
+  });
+  const row = ledger.generationJob('job-protected')!;
+  assert.equal(row.submission, 'submitted');
+  assert.equal(row.providerJobId, 'provider-42');
 });
 
 void test('pricing estimates are deterministic and configurable', () => {

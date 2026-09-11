@@ -41,6 +41,65 @@ function markSubmissionUnknown(job: Job): string {
 }
 
 /**
+ * The ONE submission entry, shared by first submission and crash recovery:
+ *
+ *   prepare & validate → confirm persistent state allows submit →
+ *   persist the pre-submit checkpoint → send → persist the provider id.
+ *
+ * beforeSubmit is part of this contract, not an optional extra a caller may
+ * forget: the checkpoint must be durable before any adapter sends the request.
+ */
+async function submitJob(
+  p: Project,
+  job: Job,
+  persist: () => Promise<void>,
+): Promise<void> {
+  if (job.submission?.state === 'unknown')
+    throw new Error('上次供应商提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
+  if (job.submission?.state === 'submitted' && !job.remoteId)
+    throw new Error('已提交任务缺少远端任务 ID，请核查供应商记录后再手动重试。');
+  if (job.kind === 'video' && !job.group) {
+    const preview = videoPreview(p, job);
+    if (preview.issues.length) throw new Error(preview.issues.join(' '));
+  }
+  job.remoteId = await submitMedia(p, job, async () => {
+    const previousId = job.remoteId;
+    job.remoteId = markSubmissionUnknown(job);
+    persistJob(p, job);
+    try {
+      await persist();
+    } catch (e) {
+      job.remoteId = previousId;
+      throw e;
+    }
+  });
+  job.submission = { state: 'submitted', providerJobId: job.remoteId };
+  persistJob(p, job);
+  await persist();
+}
+
+/**
+ * Reconciliation BEFORE lease handling: a known provider id in the durable
+ * ledger wins over an unknown/empty local state. An expired lease only means
+ * the local worker died — it never invalidates a confirmed remote submission.
+ */
+function reconcileSubmission(p: Project, job: Job): boolean {
+  const row = safely((ledger) => ledger.generationJob(job.id));
+  if (
+    row &&
+    row.submission === 'submitted' &&
+    row.providerJobId &&
+    job.submission?.state !== 'submitted'
+  ) {
+    job.submission = { state: 'submitted', providerJobId: row.providerJobId };
+    if (!job.remoteId || job.remoteId === 'fal-pending') job.remoteId = row.providerJobId;
+    persistJob(p, job);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Sequential media queue. Downstream requests receive the previous output.
  * Submissions persist the idempotency key first; resubmission after a crash
  * reuses the same key instead of double-paying. The durable ledger records
@@ -53,6 +112,9 @@ export async function tick(p: Project, persist: () => Promise<void>) {
   const index = p.plan.shots.findIndex((s) => s.id === job.shotId);
   const shot = p.plan.shots[index];
   const previous = referencePredecessor(p.plan.shots, index);
+  // Reconcile with the durable ledger FIRST: a known provider id survives an
+  // expired lease and an unknown local marker.
+  if (job.status === 'running') reconcileSubmission(p, job);
   // Lease recovery: a running job whose lease expired belonged to a dead local
   // worker. Unsent work may restart; unknown submissions must not re-submit.
   if (job.status === 'running' && job.leaseExpiresAt && Date.now() > job.leaseExpiresAt) {
@@ -111,24 +173,7 @@ export async function tick(p: Project, persist: () => Promise<void>) {
       persistJob(p, job);
       await persist();
       if (job.mode === 'live' && !job.remoteId) {
-        if (job.kind === 'video' && !job.group) {
-          const preview = videoPreview(p, job);
-          if (preview.issues.length) throw new Error(preview.issues.join(' '));
-        }
-        job.remoteId = await submitMedia(p, job, async () => {
-          const previousId = job.remoteId;
-          job.remoteId = markSubmissionUnknown(job);
-          persistJob(p, job);
-          try {
-            await persist();
-          } catch (e) {
-            job.remoteId = previousId;
-            throw e;
-          }
-        });
-        job.submission = { state: 'submitted', providerJobId: job.remoteId };
-        persistJob(p, job);
-        await persist();
+        await submitJob(p, job, persist);
       }
       return;
     }
@@ -155,9 +200,7 @@ export async function tick(p: Project, persist: () => Promise<void>) {
     }
     // Persist the idempotency key before submission; resubmission after a crash uses the same key.
     if (!job.remoteId) {
-      job.remoteId = await submitMedia(p, job);
-      job.submission = { state: 'submitted', providerJobId: job.remoteId };
-      persistJob(p, job);
+      await submitJob(p, job, persist);
       return;
     }
     if (job.remoteId === 'fal-pending') {
@@ -219,6 +262,7 @@ async function reflect(p: Project, j: Job): Promise<boolean> {
     source: review.source,
     notes: review.notes,
     attempt,
+    at: Date.now(),
   });
   transition(p, 'qa', '自动审查：' + review.notes);
   transition(p, 'generation', review.verdict === 'passed' ? '审查通过，继续生成。' : '审查退回，检查重试预算。');

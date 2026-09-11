@@ -4,6 +4,8 @@ import type { AgentTask } from './task.ts';
 import { actionForTaskKind } from './task.ts';
 import type { AutoDecision } from './planner.ts';
 import { routeCapability, selectVerifier } from './router.ts';
+import { getAgentAction } from './actions/registry.ts';
+import { capabilitiesForRole, satisfiesCapabilityRequirement } from './capabilities.ts';
 
 /**
  * Task Scheduler (sequential kernel). The agent loop serves tasks: before
@@ -71,6 +73,14 @@ export function decisionForTask(
     ? roles.find((r) => r.id === task.ownerRoleId)
     : undefined;
   if (!role && task.capability) role = routeCapability(roles, task.capability);
+  if (!role) {
+    // Plan entries may omit roleId: route by the action's full capability
+    // requirement (anyOf/allOf) instead of a drift-prone single-capability map.
+    const requirement = getAgentAction(action).capabilityRequirement;
+    role = roles.find((r) =>
+      satisfiesCapabilityRequirement(capabilitiesForRole(r.id, roles), requirement),
+    );
+  }
   if (!role) return undefined;
   return { roleId: role.id, action, reason: task.reason, targets: task.targetShotIds };
 }
