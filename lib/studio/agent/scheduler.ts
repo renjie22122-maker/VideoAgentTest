@@ -14,8 +14,21 @@ import { selectVerifier } from './router.ts';
  * completed. A missing or non-completed dependency blocks the task — being
  * lenient here would let truncated or buggy task graphs run ahead of their
  * prerequisites.
+ *
+ * The scheduler returns a discriminated result so the runtime can never
+ * mistake "nothing to do" for "work exists but must not run yet":
+ *
+ *   ready   → execute this task now
+ *   blocked → a task exists but its dependencies forbid it; do NOT replan
+ *   waiting → a runnable task has no eligible agent; wait for the user
+ *   idle    → no pre-planned work; the planner may propose new work
  */
 export type ScheduledDecision = { task: AgentTask; decision: AutoDecision };
+export type SchedulerResult =
+  | { kind: 'ready'; task: AgentTask; decision: AutoDecision }
+  | { kind: 'blocked'; task: AgentTask; reason: string }
+  | { kind: 'waiting'; task: AgentTask; reason: string }
+  | { kind: 'idle' };
 
 export function blockedReason(task: AgentTask, tasks: readonly AgentTask[]): string | undefined {
   const byId = new Map(tasks.map((t) => [t.id, t]));
@@ -40,13 +53,23 @@ export function runnableTasks(run: AutoRun): AgentTask[] {
 export function nextScheduledTask(
   run: AutoRun,
   roles: readonly AgentDefinition[],
-): ScheduledDecision | undefined {
-  const runnable = runnableTasks(run).find((t) => t.kind === 'verify_storyboard');
-  if (!runnable) return undefined;
-  const reviewer = selectVerifier(roles, runnable.verification?.authorRoleId ?? '');
-  if (!reviewer) return undefined;
+): SchedulerResult {
+  const tasks = run.tasks ?? [];
+  const open = tasks.filter((t) => t.status === 'pending' || t.status === 'verification');
+  const verify = open.find((t) => t.kind === 'verify_storyboard');
+  if (!verify) return { kind: 'idle' };
+  const blocked = blockedReason(verify, tasks);
+  if (blocked) return { kind: 'blocked', task: verify, reason: blocked };
+  const reviewer = selectVerifier(roles, verify.verification?.authorRoleId ?? '');
+  if (!reviewer)
+    return {
+      kind: 'waiting',
+      task: verify,
+      reason: '缺少具备独立复核能力的已启用岗位。',
+    };
   return {
-    task: runnable,
+    kind: 'ready',
+    task: verify,
     decision: {
       roleId: reviewer.id,
       action: 'review',

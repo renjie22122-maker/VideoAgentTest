@@ -5,6 +5,9 @@ import {
   validateAutoDecision,
   describeAllowedActions,
   agentActions,
+  satisfiesCapabilityRequirement,
+  capabilitiesForRole,
+  grantedCapabilities,
 } from '../lib/studio/autopilot.ts';
 import { demoPlan } from '../lib/studio/domain.ts';
 import { initialProduction } from '../lib/studio/graph.ts';
@@ -100,6 +103,46 @@ void test('availableActions is the data-driven twin of the policy', () => {
   ).find((e) => e.action === 'revise_shots')!;
   assert.equal(blocked.allowed, false);
   assert.match(blocked.reasons[0], /所需能力/);
+});
+
+void test('capabilities: [] is an explicit revocation, not a fallback to defaults', () => {
+  const p = project(true, true);
+  p.production!.agentConfig = {
+    version: 1,
+    agents: [
+      { id: 'writer', name: '编剧', stages: ['script'], deliverable: '剧本', checks: '检查', enabled: true, capabilities: [] },
+    ],
+  };
+  const writer = p.production!.agentConfig.agents[0];
+  assert.deepEqual(capabilitiesForRole('writer', p.production!.agentConfig.agents), []);
+  assert.deepEqual(grantedCapabilities(writer), []);
+  assert.throws(
+    () => validateAutoDecision({ action: 'write_script', roleId: 'writer', reason: '编剧' }, p),
+    /未授予/,
+  );
+  // Without the field at all, built-in defaults still apply.
+  delete writer.capabilities;
+  assert.ok(capabilitiesForRole('writer', p.production!.agentConfig.agents).includes('write_screenplay'));
+});
+
+void test('capability requirement interpretation is identical everywhere', () => {
+  const granted = ['write_screenplay'] as const;
+  const cases: { label: string; requirement: Parameters<typeof satisfiesCapabilityRequirement>[1]; expected: boolean }[] = [
+    { label: 'anyOf satisfied', requirement: { anyOf: ['write_screenplay'] }, expected: true },
+    { label: 'anyOf missing', requirement: { anyOf: ['revise_storyboard'] }, expected: false },
+    { label: 'allOf-only satisfied', requirement: { allOf: ['write_screenplay'] }, expected: true },
+    { label: 'allOf-only missing', requirement: { allOf: ['review_camera'] }, expected: false },
+    { label: 'allOf satisfied + anyOf missing', requirement: { allOf: ['write_screenplay'], anyOf: ['review_camera'] }, expected: false },
+    { label: 'empty requirement', requirement: {}, expected: true },
+  ];
+  for (const c of cases) {
+    assert.equal(satisfiesCapabilityRequirement(granted, c.requirement), c.expected, c.label);
+  }
+  // The policy engine's verdict for a synthetic allOf-only requirement matches
+  // the shared interpreter (catalog and policy share this function).
+  const p = project(true, true);
+  const verdict = evaluateAutoDecision({ action: 'review', roleId: 'writer', reason: '审查' }, p).policy;
+  assert.equal(verdict.allowed, satisfiesCapabilityRequirement(verdict.grantedCapabilities, { anyOf: ['review_story', 'review_camera', 'review_continuity', 'review_qa', 'verify_storyboard'] }));
 });
 
 void test('agent config validates declared capabilities strictly', () => {

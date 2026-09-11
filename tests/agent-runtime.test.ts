@@ -6,7 +6,8 @@ import {
   agentActions,
   buildObservation,
   describeAllowedActions,
-  planDecision,
+  syncVerificationTask,
+  nextScheduledTask,
   beginStep,
   finishStep,
 } from '../lib/studio/autopilot.ts';
@@ -106,7 +107,7 @@ void test('planner observation carries the data-driven action catalog', () => {
   assert.ok(observation.roleCapabilities.writer.some((c) => c.id === 'write_screenplay'));
 });
 
-void test('planner pause keeps the pending review gate and never consumes a step', async () => {
+void test('the scheduler owns the pending review gate: no verifier means waiting, never a step', () => {
   const p = project();
   p.production!.agentConfig = {
     version: 1,
@@ -128,10 +129,12 @@ void test('planner pause keeps the pending review gate and never consumes a step
     reason: '修订',
     previousFindings: [],
   };
-  const observation = buildObservation(p, run);
-  const plan = await planDecision(p, run, observation, undefined);
-  assert.equal(plan.kind, 'pause');
-  assert.equal(run.status, 'waiting_user');
+  // pendingReview migrates to an explicit verification task…
+  syncVerificationTask(run, p);
+  const scheduled = nextScheduledTask(run, p.production!.agentConfig.agents);
+  assert.equal(scheduled.kind, 'waiting');
+  // …and the scheduler, not the planner, owns the gate.
+  assert.equal(run.status, 'running');
   assert.equal(run.steps, 0);
 });
 

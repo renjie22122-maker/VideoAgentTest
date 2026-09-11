@@ -151,3 +151,32 @@ void test('the artifact manifest marks surviving downstream artifacts stale with
   assert.equal(byKey.get('shot:shot-2'), 'current');
   assert.equal(byKey.get('asset:asset-old'), 'archived');
 });
+
+void test('a video regenerated after the affecting event is current, not stale', () => {
+  const p = project();
+  const eventAt = 1000;
+  recordInvalidation(p, [{ id: 'asset-renata', kind: 'asset' }], []);
+  p.production!.artifactEvents![0].at = eventAt;
+  // A succeeded regeneration job finished after the event: the new output
+  // was produced from the new inputs.
+  p.jobs.push({
+    id: 'job-regenerated',
+    shotId: 'shot-1',
+    kind: 'video',
+    status: 'succeeded',
+    mode: 'demo',
+    revision: p.revision,
+    createdAt: 0,
+    finishedAt: eventAt + 500,
+  });
+  const manifest = artifactManifest(p);
+  const byKey = new Map(manifest.map((n) => [n.ref.kind + ':' + n.ref.id, n.status]));
+  assert.equal(byKey.get('video:shot-1'), 'current');
+  // Other surviving artifacts are still stale; history is untouched.
+  assert.equal(byKey.get('prompt:shot-1'), 'stale');
+  // An OLD finished job does not rescue the artifact.
+  p.jobs[0].finishedAt = eventAt - 500;
+  const again = artifactManifest(p);
+  const byKey2 = new Map(again.map((n) => [n.ref.kind + ':' + n.ref.id, n.status]));
+  assert.equal(byKey2.get('video:shot-1'), 'stale');
+});

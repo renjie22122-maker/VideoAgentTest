@@ -3,7 +3,7 @@ import { autoActions } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import { getAgentAction } from './actions/registry.ts';
 import type { CapabilityRequirement } from './actions/types.ts';
-import { grantedCapabilities } from './capabilities.ts';
+import { grantedCapabilities, satisfiesCapabilityRequirement } from './capabilities.ts';
 import type { CapabilityId } from './capabilities.ts';
 import type { AutoDecision } from './planner.ts';
 
@@ -64,19 +64,15 @@ export function evaluateAutoDecision(
       ? [...grantedCapabilities(roles.find((r) => r.id === roleId))]
       : [];
   if (actionValid && actionId !== 'stop' && action) {
-    const requirement = action.capabilityRequirement;
-    const allOfOk =
-      !requirement.allOf?.length || requirement.allOf.every((c) => granted.includes(c));
-    const anyOfOk =
-      !requirement.anyOf?.length || requirement.anyOf.some((c) => granted.includes(c));
-    if (!allOfOk || !anyOfOk)
+    // Single interpreter shared with the action catalog — no drift possible.
+    if (!satisfiesCapabilityRequirement(granted, action.capabilityRequirement))
       violations.push({
         code: 'capability_missing',
         message:
           '总 Agent 选择的岗位未授予执行「' +
           actionId +
           '」所需的能力（' +
-          capabilityLabel(requirement) +
+          capabilityLabel(action.capabilityRequirement) +
           '）。请在岗位配置中补充能力。',
       });
   }

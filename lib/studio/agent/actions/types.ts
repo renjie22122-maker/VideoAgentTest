@@ -25,6 +25,8 @@ export type ActionExecutionContext = {
   role: AgentDefinition | undefined;
   entry: AutoLogEntry;
   contentBefore: string;
+  /** The step's task record — reused when the scheduler drove this step. */
+  taskId: string;
 };
 
 /** Explicit capability semantics: allOf must ALL be granted; anyOf needs one. */

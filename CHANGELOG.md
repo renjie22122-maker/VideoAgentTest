@@ -1,5 +1,24 @@
 # 更新记录
 
+## 2026-09-13 · 执行链封口：统一 Policy 门、调度放行权与状态语义修正
+
+按第四轮评审修复两个执行链旁路与三个边界问题。核心原则：权限、依赖与版本状态必须在**所有执行路径**上成立，而不是只在单点成立。
+
+### 修复
+
+- **Scheduler 旁路封口**：`autoStep()` 在全部决策路径（LLM / 用户指定 / Scheduler 预排）汇合后、`beginStep()` 前统一执行 Policy 检查；Scheduler 返回判别结果（ready / blocked / waiting / idle），blocked 与 waiting 直接进入等待状态，**不再回退 Planner**——被阻塞的复核无法通过兼容分支绕过依赖。
+- **复核人能力驱动**：`selectVerifier` 先按 `verify_storyboard` 授予筛选（导演已显式默认授予，不再靠岗位名隐式获得）、排除作者，再应用 reviewer → continuity → director 优先级；无审查能力的自定义 QA 岗位不会再被选中执行复核。
+- **单一调度记录**：调度任务被复用时，步骤的任务记录就是 verify 任务本身（同一 task id 走完 verification → completed）；演示复核未过时任务回到 verification 状态，闸门保持打开。
+- **移除 planner 的 pendingReview 兼容分支**：旧 `pendingReview` 在步首迁移为显式 verify 任务，此后只有调度器拥有复核放行权（单规则集）。
+- **`capabilities: []` 语义修正**：显式空数组 = 撤销全部权限，不再回退内置默认（按字段存在性判断，而非数组长度）。
+- **能力条件统一解释**：新增 `satisfiesCapabilityRequirement` 作为 allOf/anyOf 的唯一解释器，Policy 与动作目录共用，修复“仅有 allOf 时目录误判不允许”的漂移。
+- **Artifact Manifest 再生判定**：以再生任务完成时间与最近失效事件比较——失效后重新生成的视频为 current，旧历史仍保留；不再把“历史上发生过失效”误标为新产物。
+
+### 文档与验证
+
+- 新增完整路径回归：无权限复核人零 worker 调用、被阻塞复核零 planner/worker 调用（live 模式验证）、空权限撤销、allOf 一致性、再生产物 current；52 个测试文件、类型检查、代码规范与生产构建全部通过。
+- 架构文档更新统一 Policy 门、调度放行权与严格依赖语义。
+
 ## 2026-09-13 · Runtime 收敛：单一动作事实源、通用 Policy 与严格依赖语义
 
 按第三轮评审收敛，不再新增抽象：让已落地的骨架承担全部规则表达。

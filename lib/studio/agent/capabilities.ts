@@ -1,4 +1,5 @@
 import type { AutoDecision } from './planner.ts';
+import type { CapabilityRequirement } from './actions/types.ts';
 
 /**
  * Capability model: separates "who an agent is" (role) from "what it can do"
@@ -62,7 +63,7 @@ export const defaultRoleCapabilities: Record<string, readonly CapabilityId[]> = 
   producer: ['plan_work', 'review_story'],
   development: ['clarify_brief'],
   writer: ['write_screenplay', 'review_story'],
-  director: ['review_story', 'design_storyboard', 'revise_storyboard', 'review_camera'],
+  director: ['review_story', 'design_storyboard', 'revise_storyboard', 'review_camera', 'verify_storyboard'],
   storyboard: ['design_storyboard', 'revise_storyboard'],
   camera: ['review_camera', 'review_continuity'],
   art: ['design_art', 'design_character', 'design_environment', 'design_prop'],
@@ -83,7 +84,8 @@ export function capabilitiesForRole(
   agents?: readonly { id: string; capabilities?: readonly CapabilityId[] }[],
 ): readonly CapabilityId[] {
   const declared = agents?.find((a) => a.id === roleId)?.capabilities;
-  if (declared?.length) return declared;
+  // Presence, not length: capabilities: [] means "explicitly revoke everything".
+  if (declared !== undefined) return declared;
   return defaultRoleCapabilities[roleId] ?? [];
 }
 
@@ -95,9 +97,23 @@ export type CapabilityHolder =
 export function grantedCapabilities(holder: CapabilityHolder | undefined): readonly CapabilityId[] {
   if (!holder) return [];
   if (typeof holder === 'string') return defaultRoleCapabilities[holder] ?? [];
-  if (holder.capabilities?.length) return holder.capabilities;
+  if (holder.capabilities !== undefined) return holder.capabilities;
   if (!holder.id) return [];
   return defaultRoleCapabilities[holder.id] ?? [];
+}
+
+/**
+ * The single interpreter for capability requirements, shared by the policy
+ * engine (authorization) and the action catalog (planner view), so the two
+ * can never drift. An absent side of the requirement is always satisfied.
+ */
+export function satisfiesCapabilityRequirement(
+  granted: readonly CapabilityId[],
+  requirement: CapabilityRequirement,
+): boolean {
+  const allOfOk = !requirement.allOf || requirement.allOf.every((c) => granted.includes(c));
+  const anyOfOk = !requirement.anyOf || requirement.anyOf.some((c) => granted.includes(c));
+  return allOfOk && anyOfOk;
 }
 
 /**

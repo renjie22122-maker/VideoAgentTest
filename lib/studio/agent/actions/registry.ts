@@ -1,6 +1,6 @@
 import type { AgentDefinition } from '../../team-config.ts';
 import type { Project } from '../../types.ts';
-import { capabilitiesForRole } from '../capabilities.ts';
+import { capabilitiesForRole, satisfiesCapabilityRequirement } from '../capabilities.ts';
 import type { AgentAction, CapabilityRequirement } from './types.ts';
 import { reviewAction } from './review.ts';
 import { reviseStoryboardAction } from './revise-storyboard.ts';
@@ -58,9 +58,9 @@ export function describeAllowedActions(
     const requirement = a.capabilityRequirement;
     const needed = [...(requirement.allOf ?? []), ...(requirement.anyOf ?? [])];
     if (needed.length) {
+      // Same interpreter as the policy engine: absent side = satisfied.
       const capable = roles.filter((r) =>
-        (requirement.allOf ?? []).every((c) => capabilitiesForRole(r.id, roles).includes(c)) &&
-        (requirement.anyOf ?? []).some((c) => capabilitiesForRole(r.id, roles).includes(c)),
+        satisfiesCapabilityRequirement(capabilitiesForRole(r.id, roles), requirement),
       );
       if (!capable.length)
         reasons.push('没有已启用岗位授予所需能力（' + needed.join('/') + '）。');

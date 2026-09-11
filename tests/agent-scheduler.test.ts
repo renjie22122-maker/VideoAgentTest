@@ -67,17 +67,148 @@ void test('the scheduler routes verification by capability preference, never to 
     { id: 't2', kind: 'verify_storyboard', status: 'verification', ownerRoleId: 'storyboard', capability: 'verify_storyboard', createdBy: 'system', dependsOn: ['t1'], targetShotIds: [], reason: '复核', inputVersions: { revision: 1, configRevision: 0 }, attempts: 0, createdAt: 0, updatedAt: 0, verification: { required: true, authorRoleId: 'storyboard', previousFindings: [] } },
   ];
   const roles = defaultAgents();
-  const scheduled = nextScheduledTask(run, roles)!;
+  const scheduled = nextScheduledTask(run, roles);
+  assert.equal(scheduled.kind, 'ready');
+  if (scheduled.kind !== 'ready') return;
   assert.equal(scheduled.task.id, 't2');
   // Historical preference order: reviewer first, never the author.
   assert.equal(scheduled.decision.roleId, 'reviewer');
   assert.equal(scheduled.decision.action, 'review');
-  // Router honors capability grants and exclusion.
-  assert.equal(routeCapability(roles, 'verify_storyboard', 'storyboard')!.id, 'continuity');
+  // Router honors capability grants and exclusion (director is explicitly
+  // granted verify_storyboard and precedes continuity in the team order).
+  assert.equal(routeCapability(roles, 'verify_storyboard', 'storyboard')!.id, 'director');
   assert.equal(selectVerifier(roles, 'storyboard')!.id, 'reviewer');
-  // Only the author enabled: nothing is scheduled.
+  // Only the author enabled: runnable task, no eligible verifier → waiting.
   const alone = roles.filter((r) => r.id === 'storyboard');
-  assert.equal(nextScheduledTask(run, alone), undefined);
+  const waiting = nextScheduledTask(run, alone);
+  assert.equal(waiting.kind, 'waiting');
+  // A capability-less QA role is not eligible just because it sits in the qa stage.
+  const qaWithoutCapability: import('../lib/studio/team-config.ts').AgentDefinition[] = [
+    { id: 'storyboard', name: '分镜', stages: ['storyboard'], deliverable: 'x', checks: 'x', enabled: true },
+    { id: 'qa_agent', name: '质检', stages: ['qa'], deliverable: 'x', checks: 'x', enabled: true },
+  ];
+  const byStageOnly = nextScheduledTask(run, qaWithoutCapability);
+  assert.equal(byStageOnly.kind, 'waiting');
+  assert.equal(selectVerifier(qaWithoutCapability, 'storyboard'), undefined);
+});
+
+void test('blocked verification never falls back to the planner', async () => {
+  const p = project();
+  const run = createAutoRun(p, '任务');
+  run.tasks = [
+    { id: 't1', kind: 'revise_storyboard', status: 'cancelled', ownerRoleId: 'storyboard', createdBy: 'system', dependsOn: [], targetShotIds: [], reason: '修订', inputVersions: { revision: 1, configRevision: 0 }, attempts: 1, createdAt: 0, updatedAt: 0 },
+    { id: 't2', kind: 'verify_storyboard', status: 'verification', ownerRoleId: 'storyboard', capability: 'verify_storyboard', createdBy: 'system', dependsOn: ['t1'], targetShotIds: [], reason: '复核', inputVersions: { revision: 1, configRevision: 0 }, attempts: 0, createdAt: 0, updatedAt: 0, verification: { required: true, authorRoleId: 'storyboard', previousFindings: [] } },
+  ];
+  p.production!.autoRun = run;
+  run.pendingReview = { revision: 1, authorRoleId: 'storyboard', reason: '修订', previousFindings: [] };
+  const scheduled = nextScheduledTask(run, defaultAgents());
+  assert.equal(scheduled.kind, 'blocked');
+  // autoStep must stop without asking the planner or calling any worker.
+  await autoStep(p, { roleId: 'producer', action: 'stop', reason: '想直接结束' });
+  assert.equal(run.status, 'waiting_user');
+  assert.equal(run.stopReason, 'review_required');
+  assert.equal(run.steps, 0);
+  assert.equal(run.log.length, 0);
+  assert.match(run.summary!, /被阻塞/);
+  assert.equal(run.tasks!.find((t) => t.id === 't2')!.status, 'verification');
+});
+
+void test('a blocked verification calls no worker even in live mode', async (t) => {
+  const p = project();
+  p.mode = 'live';
+  p.plan = demoPlan(p);
+  p.production!.node = 'storyboard';
+  p.production!.script = demoScreenplay(p);
+  p.production!.scriptApproved = true;
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: true };
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: 'scheduler-blocked-' + Date.now(),
+    LLM_BASE_URL: 'https://scheduler-blocked.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
+  });
+  const run = createAutoRun(p, '复核');
+  p.production!.autoRun = run;
+  run.pendingReview = { revision: p.revision, authorRoleId: 'storyboard', reason: '修订', previousFindings: [] };
+  run.tasks = [
+    { id: 't1', kind: 'revise_storyboard', status: 'cancelled', ownerRoleId: 'storyboard', createdBy: 'system', dependsOn: [], targetShotIds: [], reason: '修订', inputVersions: { revision: 1, configRevision: 0 }, attempts: 1, createdAt: 0, updatedAt: 0 },
+    { id: 't2', kind: 'verify_storyboard', status: 'verification', ownerRoleId: 'storyboard', capability: 'verify_storyboard', createdBy: 'system', dependsOn: ['t1'], targetShotIds: [], reason: '复核', inputVersions: { revision: 1, configRevision: 0 }, attempts: 0, createdAt: 0, updatedAt: 0, verification: { required: true, authorRoleId: 'storyboard', previousFindings: [] } },
+  ];
+  await autoStep(p, { roleId: 'producer', action: 'stop', reason: '想直接结束' });
+  assert.equal(calls, 0, 'no supervisor or worker call may happen on a blocked path');
+  assert.equal(run.status, 'waiting_user');
+  assert.equal(run.steps, 0);
+});
+
+void test('a verifier without review capability is never executed through the scheduled path', async (t) => {
+  const p = project();
+  p.mode = 'live';
+  p.plan = demoPlan(p);
+  p.production!.node = 'storyboard';
+  p.production!.script = demoScreenplay(p);
+  p.production!.scriptApproved = true;
+  p.production!.assets = { bible: p.plan.bible, seed: 42, locked: true };
+  p.production!.agentConfig = {
+    version: 1,
+    agents: [
+      { id: 'storyboard', name: '分镜', stages: ['storyboard'], deliverable: 'x', checks: 'x', enabled: true, capabilities: ['revise_storyboard'] },
+      { id: 'qa_agent', name: '质检', stages: ['qa'], deliverable: 'x', checks: 'x', enabled: true, capabilities: ['review_qa'] },
+    ],
+  };
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: 'scheduler-verifier-' + Date.now(),
+    LLM_BASE_URL: 'https://scheduler-verifier.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+  const changed = withIntent(p.plan.shots, p.production!.script);
+  changed[0].description += ' 主角先站稳，再转身。';
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ shots: changed }) } }] }));
+  });
+  p.production!.autoRun = createAutoRun(p, '修订分镜', 2);
+  await autoStep(p, { roleId: 'storyboard', action: 'revise_shots', reason: '补充动作过渡' });
+  assert.equal(calls, 1, 'only the revise worker call may happen');
+  const verify = p.production!.autoRun!.tasks!.find((task) => task.kind === 'verify_storyboard')!;
+  assert.equal(verify.status, 'verification');
+  // The next step: qa_agent grants review_qa but NOT verify_storyboard — the
+  // capability-driven selector refuses it; no worker call, gate stays open.
+  p.production!.autoRun = createAutoRun(p, '继续复核');
+  syncVerificationTask(p.production!.autoRun!, p);
+  await autoStep(p, { roleId: 'producer', action: 'stop', reason: '想直接结束' });
+  assert.equal(calls, 1, 'an incapable verifier must never reach a worker');
+  assert.equal(p.production!.autoRun!.status, 'waiting_user');
+  assert.equal(p.production!.autoRun!.stopReason, 'review_required');
+  assert.equal(p.production!.autoRun!.pendingReview!.authorRoleId, 'storyboard');
 });
 
 void test('autoStep serves the scheduled verification task before any planner call', async (t) => {

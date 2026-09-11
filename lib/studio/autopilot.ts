@@ -4,8 +4,10 @@ import type { Project } from './types.ts';
 import { buildObservation } from './agent/observation.ts';
 import { planDecision } from './agent/planner.ts';
 import type { AutoDecision, PlanOutcome } from './agent/planner.ts';
+import { evaluateAutoDecision } from './agent/policy.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
 import { syncVerificationTask } from './agent/task.ts';
+import type { AgentTask } from './agent/task.ts';
 import { getAgentAction, registeredAgentActions, describeAllowedActions } from './agent/actions/registry.ts';
 import { nextScheduledTask } from './agent/scheduler.ts';
 import { buildQualityReport } from './quality-report.ts';
@@ -23,7 +25,7 @@ export { getAgentAction, registeredAgentActions, agentActions, describeAllowedAc
 export { beginStep, finishStep } from './agent/run-controller.ts';
 export { syncVerificationTask, openVerificationTask, taskKindForAction } from './agent/task.ts';
 export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from './agent/task.ts';
-export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities } from './agent/capabilities.ts';
+export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities, satisfiesCapabilityRequirement } from './agent/capabilities.ts';
 export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
 export { routeCapability, selectVerifier } from './agent/router.ts';
 export { nextScheduledTask, runnableTasks, blockedReason } from './agent/scheduler.ts';
@@ -36,12 +38,12 @@ export { nextScheduledTask, runnableTasks, blockedReason } from './agent/schedul
  *   buildObservation  ObservationBuilder  (deterministic context projection)
  *   nextScheduledTask Task Scheduler      (pre-planned tasks first, via dependsOn)
  *   planDecision      Planner             (LLM proposes; runtime disposes)
- *   policy            Policy Engine       (allow / deny, capability authority)
+ *   evaluateAutoDecision  Policy Engine   (single final allow/deny gate)
  *   getAgentAction    ActionRegistry      (whitelisted, bounded mutations)
  *   beginStep/finish  RunController       (audit log, repetition, budget)
  *
- * An agent never mutates the project directly: each action is a validated
- * executor, and the run controller records the verified outcome.
+ * Every decision path — LLM, assigned, demo, scheduled — converges on the
+ * policy gate before beginStep. No path may execute around it.
  */
 export async function autoStep(p: Project, assigned?: AutoDecision) {
   const run = p.production?.autoRun;
@@ -53,6 +55,8 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
   if (run.pendingReview && run.pendingReview.revision !== p.revision)
     delete run.pendingReview;
   // pendingReview is mirrored by an explicit verification task (AUTHOR != VERIFIER).
+  // Legacy pendingReview without a task is migrated here; from then on only the
+  // scheduler decides whether verification may run.
   syncVerificationTask(run, p);
   const baseObservation = buildObservation(p, run);
   const observation = {
@@ -61,20 +65,52 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     // semantics and preconditions — the policy engine is the enforcement twin.
     allowedActions: describeAllowedActions(baseObservation.roles, p),
   };
-  // The agent loop serves tasks: scheduled work (dependsOn satisfied) runs
-  // before the LLM gets to propose anything new.
   const scheduled = nextScheduledTask(run, observation.roles);
-  const plan: PlanOutcome = scheduled
-    ? {
-        kind: 'decision',
-        decision: scheduled.decision,
-        requiredReview: scheduled.decision,
-      }
-    : await planDecision(p, run, observation, assigned);
-  if (plan.kind === 'pause') return;
-  const { decision, requiredReview } = plan;
+  let decision: AutoDecision;
+  let requiredReview: AutoDecision | undefined;
+  let scheduledTask: AgentTask | undefined;
+  if (scheduled.kind === 'ready') {
+    // Final authorization even for scheduler-produced decisions: the gate is
+    // after ALL paths converge, not inside the planner.
+    const { policy } = evaluateAutoDecision(scheduled.decision, p);
+    if (!policy.allowed) {
+      run.status = 'waiting_user';
+      run.stopReason = 'review_required';
+      run.summary =
+        '分镜已修改，但可用复核岗位缺少执行权限。请在岗位配置中授予相应能力后继续；尚未通过复核。';
+      return;
+    }
+    decision = scheduled.decision;
+    requiredReview = scheduled.decision;
+    scheduledTask = scheduled.task;
+  } else if (scheduled.kind === 'blocked') {
+    // Work exists but its dependency forbids it. Do NOT fall back to the
+    // planner: that would rebuild an execution path around the block.
+    run.status = 'waiting_user';
+    run.stopReason = 'review_required';
+    run.summary =
+      '分镜复核任务被阻塞：' +
+      scheduled.reason +
+      '。已停止自动协作，请重新开始一轮协作以重建任务；尚未通过复核。';
+    return;
+  } else if (scheduled.kind === 'waiting') {
+    run.status = 'waiting_user';
+    run.stopReason = 'review_required';
+    run.summary =
+      '分镜已修改，缺少另一名已启用的会审岗位。请启用场记或质量审查后继续；尚未通过复核。';
+    return;
+  } else {
+    const plan: PlanOutcome = await planDecision(p, run, observation, assigned);
+    if (plan.kind === 'pause') return;
+    decision = plan.decision;
+    requiredReview = plan.requiredReview;
+  }
+  // The unified execution gate. Planner decisions were checked on entry, this
+  // is the one authoritative check shared by every path.
+  const { policy } = evaluateAutoDecision(decision, p);
+  if (!policy.allowed) throw new Error(policy.violations[0].message);
   const role = observation.roles.find((r) => r.id === decision.roleId);
-  const step = beginStep(run, p, decision, role, assigned ? 'user' : 'system');
+  const step = beginStep(run, p, decision, role, assigned ? 'user' : 'system', scheduledTask);
   if (!step.repeat) {
     const action = getAgentAction(decision.action);
     try {
@@ -87,6 +123,7 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
         role,
         entry: step.entry,
         contentBefore: step.contentBefore,
+        taskId: step.taskId,
       });
     } catch (error) {
       const task = run.tasks?.find((t) => t.id === step.taskId);

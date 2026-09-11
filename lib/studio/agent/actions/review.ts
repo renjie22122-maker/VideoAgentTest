@@ -12,12 +12,12 @@ export const reviewAction: AgentAction = {
   id: 'review',
   description: '部门文本会审：按当前修订出具结构化报告，不修改作品，不声称看过画面。',
   approval: '不代表实际画面通过。',
-  capabilityRequirement: { anyOf: ['review_story', 'review_camera', 'review_continuity', 'review_qa'] },
+  capabilityRequirement: { anyOf: ['review_story', 'review_camera', 'review_continuity', 'review_qa', 'verify_storyboard'] },
   preconditions: [],
   effects: ['teamReports'],
   requiresVerification: false,
   async execute(ctx) {
-    const { project: p, run, decision, requiredReview, entry } = ctx;
+    const { project: p, run, decision, requiredReview, entry, taskId } = ctx;
     const { report } = await runTeamReview(p, decision.roleId, {
       verification: run.pendingReview,
     });
@@ -31,9 +31,17 @@ export const reviewAction: AgentAction = {
       run.stopReason = 'review_required';
       run.summary =
         '演示报告无法完成修订后的真实复核。请切换真实语言模型或人工审阅；待复核标记保留。';
+      // The gate stays open: the scheduled verify task must not be completed.
+      const stepTask = run.tasks?.find((t) => t.id === taskId);
+      if (stepTask && stepTask.status === 'running') {
+        stepTask.status = 'verification';
+        stepTask.updatedAt = Date.now();
+      }
     } else if (requiredReview) {
       // The AUTHOR != VERIFIER gate: only an independent reviewer can close
-      // the verification task opened when pendingReview was set.
+      // the verification task opened when pendingReview was set. With task
+      // reuse the step's record IS the verify task and finishStep completes
+      // it; this branch remains as a backstop for non-scheduled runs.
       const verificationTask = openVerificationTask(run);
       delete run.pendingReview;
       if (verificationTask) {

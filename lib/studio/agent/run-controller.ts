@@ -60,6 +60,8 @@ export function beginStep(
   decision: AutoDecision,
   role: { name?: string; id?: string } | undefined,
   createdBy: 'user' | 'system' = 'system',
+  /** When a scheduled task drives the step, its record IS the step's record. */
+  reuseTask?: AgentTask,
 ): StartedStep {
   const before = contentFingerprint(p);
   const revisionBefore = p.revision;
@@ -72,7 +74,17 @@ export function beginStep(
     revisionBefore,
     inputFingerprint: before,
   };
-  const task = recordTask(run, p, decision, role, createdBy);
+  let task: AgentTask;
+  if (reuseTask) {
+    task = reuseTask;
+    task.status = 'running';
+    task.ownerRoleId = role?.id ?? 'producer';
+    task.capability = capabilityForDecision(role, decision.action);
+    task.attempts++;
+    task.updatedAt = Date.now();
+  } else {
+    task = recordTask(run, p, decision, role, createdBy);
+  }
   run.steps++;
   const repeat =
     decision.action !== 'stop' &&

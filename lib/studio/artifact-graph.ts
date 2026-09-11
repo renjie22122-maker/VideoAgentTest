@@ -115,17 +115,40 @@ export function recordInvalidation(p: Project, changed: ArtifactRef[], affected:
 
 /**
  * Artifact manifest: every artifact with its lineage-derived status.
- * Any artifact downstream of a recorded change is stale (current → stale);
- * superseded asset versions stay archived. History is never deleted.
+ *
+ * An artifact is stale only when a recorded change affects it AND no
+ * regeneration evidence exists after that change. For videos, a succeeded
+ * job finished after the latest affecting event proves the current output
+ * was produced from the new inputs — it is current, not stale. History is
+ * never deleted; archived stays archived.
  */
 export function artifactManifest(p: Project): ArtifactNode[] {
   const graph = buildArtifactGraph(p);
-  const stale = new Set<string>();
-  for (const event of p.production?.artifactEvents ?? []) {
-    for (const ref of downstreamClosure(graph, event.changed)) stale.add(key(ref));
+  const events = p.production?.artifactEvents ?? [];
+  const latestAffecting = new Map<string, number>();
+  for (const event of events) {
+    for (const ref of downstreamClosure(graph, event.changed)) {
+      const k = key(ref);
+      if (!latestAffecting.has(k) || event.at > latestAffecting.get(k)!)
+        latestAffecting.set(k, event.at);
+    }
   }
-  return graph.nodes.map((n) => ({
-    ref: n.ref,
-    status: n.status === 'archived' ? 'archived' : stale.has(key(n.ref)) ? 'stale' : 'current',
-  }));
+  const regeneratedAt = (ref: ArtifactRef): number => {
+    if (ref.kind !== 'video') return 0;
+    const finished = p.jobs
+      .filter(
+        (j) => j.shotId === ref.id && j.kind === 'video' && j.status === 'succeeded' && j.finishedAt,
+      )
+      .map((j) => j.finishedAt!);
+    return finished.length ? Math.max(...finished) : 0;
+  };
+  return graph.nodes.map((n) => {
+    if (n.status === 'archived') return n;
+    const affectedAt = latestAffecting.get(key(n.ref));
+    const fresh = affectedAt !== undefined && regeneratedAt(n.ref) > affectedAt;
+    return {
+      ref: n.ref,
+      status: affectedAt === undefined || fresh ? 'current' : 'stale',
+    };
+  });
 }

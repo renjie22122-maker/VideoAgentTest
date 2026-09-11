@@ -18,20 +18,22 @@ export function routeCapability(
 }
 
 /**
- * Independent verifier selection for a storyboard revision. Preserves the
- * historical preference order: reviewer → continuity → director, then any
- * enabled qa/continuity role — never the author.
+ * Independent verifier selection for a storyboard revision. Capability first:
+ * only roles that grant verify_storyboard are eligible (declared grants win,
+ * director is explicitly granted by default), the author is excluded, and the
+ * historical preference order reviewer → continuity → director applies after
+ * the capability filter — never as a substitute for it.
  */
 export function selectVerifier(
   roles: readonly AgentDefinition[],
   authorRoleId: string,
 ): AgentDefinition | undefined {
-  return (
-    ['reviewer', 'continuity', 'director']
-      .map((id) => roles.find((r) => r.id === id && r.id !== authorRoleId))
-      .find(Boolean) ??
-    roles.find(
-      (r) => r.id !== authorRoleId && r.stages.some((s) => s === 'qa' || s === 'continuity'),
-    )
+  const capable = roles.filter(
+    (r) => r.id !== authorRoleId && capabilitiesForRole(r.id, roles).includes('verify_storyboard'),
   );
+  const preferred = ['reviewer', 'continuity', 'director']
+    .map((id) => capable.find((r) => r.id === id))
+    .find(Boolean);
+  if (preferred) return preferred;
+  return capable.find((r) => r.stages.some((s) => s === 'qa' || s === 'continuity'));
 }

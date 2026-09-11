@@ -4,7 +4,6 @@ import type { AutoRun } from '../auto-run-state.ts';
 import type { Project } from '../types.ts';
 import type { AgentObservation } from './observation.ts';
 import { assertAutoDecision } from './policy.ts';
-import { selectVerifier } from './router.ts';
 
 export type AutoDecision = {
   roleId: string;
@@ -29,11 +28,10 @@ export type PlanOutcome =
     };
 
 /**
- * The planner proposes, the runtime disposes. This resolves a next decision
- * (assigned, demo, or LLM supervisor) and — when a storyboard revision is
- * pending — forces an independent reviewer before any other work can proceed.
- * Runs saved before the task model rely on this branch; newer runs have the
- * verification task scheduled by agent/scheduler.ts.
+ * The planner proposes, the runtime disposes. Pending storyboard revisions
+ * are NOT handled here: the runtime migrates pendingReview into an explicit
+ * verification task and the scheduler owns it — one rule set, no fallback
+ * path that could re-plan around a blocked dependency.
  */
 export async function planDecision(
   p: Project,
@@ -41,31 +39,12 @@ export async function planDecision(
   observation: AgentObservation,
   assigned?: AutoDecision,
 ): Promise<PlanOutcome> {
-  const roles = observation.roles;
-  let requiredReview: AutoDecision | undefined;
-  if (run.pendingReview) {
-    const reviewer = selectVerifier(roles, run.pendingReview.authorRoleId);
-    if (!reviewer) {
-      run.status = 'waiting_user';
-      run.stopReason = 'review_required';
-      run.summary =
-        '分镜已修改，缺少另一名已启用的会审岗位。请启用场记或质量审查后继续；尚未通过复核。';
-      return { kind: 'pause' };
-    }
-    requiredReview = {
-      roleId: reviewer.id,
-      action: 'review',
-      reason:
-        '复核上一轮分镜修改，逐项核对原问题是否解决及是否引入新问题；仅评估当前版本文本。',
-    };
-  }
-  const supervisor = roles.find((r) => r.id === 'producer');
+  const supervisor = observation.roles.find((r) => r.id === 'producer');
   const raw =
-    requiredReview ??
     assigned ??
     (p.mode === 'demo'
       ? {
-          roleId: roles[0].id,
+          roleId: observation.roles[0].id,
           action: run.steps ? 'stop' : 'review',
           reason: '演示自动调度，不修改真实内容。',
         }
@@ -76,5 +55,5 @@ export async function planDecision(
           { model: supervisor?.model },
         ));
   const decision = validateAutoDecision(raw, p);
-  return { kind: 'decision', decision, requiredReview };
+  return { kind: 'decision', decision, requiredReview: undefined };
 }
