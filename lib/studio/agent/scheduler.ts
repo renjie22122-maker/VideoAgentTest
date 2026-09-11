@@ -21,12 +21,15 @@ import { capabilitiesForRole, satisfiesCapabilityRequirement } from './capabilit
  * mistake "nothing to do" for "work exists but must not run yet":
  *
  *   ready   → execute this task now
+ *   batch   → several independent read-only reviews run in parallel
  *   blocked → a task exists but its dependencies forbid it; do NOT replan
  *   waiting → a runnable task has no eligible agent; wait for the user
  *   idle    → no pre-planned work; the planner may propose new work
  */
+export const REVIEW_BATCH_MAX = 4;
 export type SchedulerResult =
   | { kind: 'ready'; task: AgentTask; decision: AutoDecision }
+  | { kind: 'batch'; tasks: AgentTask[]; decisions: AutoDecision[] }
   | { kind: 'blocked'; task: AgentTask; reason: string }
   | { kind: 'waiting'; task: AgentTask; reason: string }
   | { kind: 'idle' };
@@ -96,10 +99,37 @@ export function nextScheduledTask(
   for (const task of open) {
     const blocked = blockedReason(task, tasks);
     if (blocked) return { kind: 'blocked', task, reason: blocked };
-    const decision = decisionForTask(task, roles);
-    if (!decision)
-      return { kind: 'waiting', task, reason: '缺少具备所需能力的已启用岗位。' };
-    return { kind: 'ready', task, decision };
+    break;
   }
-  return { kind: 'idle' };
+  const runnable = runnableTasks(run);
+  if (!runnable.length) return { kind: 'idle' };
+  const verify = runnable.find((t) => t.kind === 'verify_storyboard');
+  if (verify) {
+    const decision = decisionForTask(verify, roles);
+    return decision
+      ? { kind: 'ready', task: verify, decision }
+      : { kind: 'waiting', task: verify, reason: '缺少具备所需能力的已启用岗位。' };
+  }
+  // Limited parallelism: independent read-only reviews batch together (LLM
+  // calls run concurrently, state merges serially); mutation and stop tasks
+  // stay strictly serial.
+  const reviews = runnable.filter((t) => t.kind === 'review').slice(0, REVIEW_BATCH_MAX);
+  const decidable = reviews.map((task) => ({ task, decision: decisionForTask(task, roles) }));
+  const undecidable = decidable.find((x) => !x.decision);
+  if (undecidable)
+    return { kind: 'waiting', task: undecidable.task, reason: '缺少具备所需能力的已启用岗位。' };
+  const resolved = decidable as { task: AgentTask; decision: AutoDecision }[];
+  if (resolved.length >= 2)
+    return {
+      kind: 'batch',
+      tasks: resolved.map((x) => x.task),
+      decisions: resolved.map((x) => x.decision),
+    };
+  const first = resolved[0];
+  if (first) return { kind: 'ready', task: first.task, decision: first.decision };
+  const single = runnable.find((t) => t.kind !== 'review');
+  const decision = single ? decisionForTask(single, roles) : undefined;
+  return single && decision
+    ? { kind: 'ready', task: single, decision }
+    : { kind: 'waiting', task: single!, reason: '缺少具备所需能力的已启用岗位。' };
 }

@@ -215,6 +215,18 @@ export async function tick(p: Project, persist: () => Promise<void>) {
         throw new Error('上次供应商提交结果不明，已阻止自动重复提交。请核查供应商记录后再手动重试。');
       }
     }
+    // Polling budget: a bounded number of polls per job, then fail loudly.
+    job.pollCount = (job.pollCount ?? 0) + 1;
+    const pollingBudget = p.production?.retryBudget?.polling ?? 60;
+    if (job.pollCount > pollingBudget) {
+      job.status = 'failed';
+      job.error =
+        '轮询次数已达到上限（' +
+        pollingBudget +
+        ' 次）。请核查供应商任务状态后手动恢复，不要无限查询。';
+      persistJob(p, job);
+      return;
+    }
     const result = await pollMedia(job);
     job.status = result.status;
     job.error = result.error;

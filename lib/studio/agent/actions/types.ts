@@ -58,5 +58,5 @@ export interface AgentAction {
   /** Whether a successful execution forces independent verification. */
   readonly requiresVerification: boolean;
   /** Must complete or throw; the run controller owns the audit log and budget. */
-  execute(ctx: ActionExecutionContext): Promise<void>;
+  execute(ctx: ActionExecutionContext): Promise<unknown>;
 }

@@ -1,5 +1,20 @@
 # 更新记录
 
+## 2026-09-15 · 有限并行会审、重试预算形式化与不变量测试
+
+落地评审标注的新能力中可安全实现的部分：只读任务有限并行（变更任务严格串行）、重试预算与轮询上限、不变量回归。
+
+### 新增
+
+- **有限并行 DAG**（`agent/batch.ts`）：Scheduler 返回 `batch` 结果——多个无依赖的独立 review 任务在**项目克隆上并发执行 LLM 会审**（每任务先过统一 Policy 门、复用各自任务记录），验证后的报告按批次顺序**串行合并**回项目；verify 闸门与所有变更任务（revise / write / design / stop）仍严格单任务串行。失败任务标记 failed，首个错误保留 run 失败语义。
+- **重试预算形式化**：`Production.retryBudget { submission / polling / qualityRepair / llmRepair }`（默认 polling 60），`Job.pollCount` 计数——轮询超过预算即失败并明确提示核查供应商，不再无限查询。
+- **不变量测试**（`tests/invariant.test.ts`）：revision 单调不降、非法生产状态跳转被拒、生成批准门禁下不存在任何任务。
+
+### 文档与验证
+
+- 新增批处理回归（2 个会审任务 2 次 worker 调用、0 次 supervisor 调用、报告按岗位合并、任务全部完成）；56 个测试文件、typecheck、lint、build 四 gate 全部通过。
+- 架构文档补充有限并行与预算语义。
+
 ## 2026-09-15 · 运行时硬化：项目级锁、预算准入、可观测报告与批准事件
 
 完成评审清单中剩余的运行时安全与可观测项。

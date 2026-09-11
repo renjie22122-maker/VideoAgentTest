@@ -8,6 +8,7 @@ import { evaluateAutoDecision } from './agent/policy.ts';
 import { beginStep, finishStep } from './agent/run-controller.ts';
 import { syncVerificationTask, materializeDecisionTask, materializePlanTasks, reconcileRunTasks, persistTaskRecord } from './agent/task.ts';
 import type { AgentTask } from './agent/task.ts';
+import { executeReviewBatch } from './agent/batch.ts';
 import { getAgentAction, registeredAgentActions, describeAllowedActions } from './agent/actions/registry.ts';
 import { nextScheduledTask } from './agent/scheduler.ts';
 import { buildQualityReport } from './quality-report.ts';
@@ -28,7 +29,8 @@ export type { AgentTask, AgentTaskKind, AgentTaskStatus, AgentTaskResult } from 
 export { capabilityForDecision, capabilitiesForRole, defaultRoleCapabilities, capabilityLabels, grantedCapabilities, satisfiesCapabilityRequirement } from './agent/capabilities.ts';
 export type { CapabilityId, CapabilityHolder } from './agent/capabilities.ts';
 export { routeCapability, selectVerifier } from './agent/router.ts';
-export { nextScheduledTask, runnableTasks, blockedReason } from './agent/scheduler.ts';
+export { nextScheduledTask, runnableTasks, blockedReason, REVIEW_BATCH_MAX } from './agent/scheduler.ts';
+export { executeReviewBatch } from './agent/batch.ts';
 
 /**
  * One automatic collaboration step.
@@ -104,6 +106,11 @@ export async function autoStep(p: Project, assigned?: AutoDecision) {
     run.stopReason = 'review_required';
     run.summary =
       '分镜已修改，缺少另一名已启用的会审岗位。请启用场记或质量审查后继续；尚未通过复核。';
+    return;
+  } else if (scheduled.kind === 'batch') {
+    // Limited parallelism: independent read-only reviews run concurrently,
+    // state merges serially. Mutation tasks never batch.
+    await executeReviewBatch(p, run, observation, scheduled.tasks, scheduled.decisions);
     return;
   } else {
     const plan: PlanOutcome = await planDecision(p, run, observation, assigned);

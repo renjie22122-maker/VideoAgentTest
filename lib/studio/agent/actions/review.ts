@@ -69,5 +69,7 @@ export const reviewAction: AgentAction = {
               openTasks +
               ' 项已接受的后续任务，将在剩余步数内继续执行。';
     }
+    // The report travels back so the parallel batch can merge it serially.
+    return { report };
   },
 };

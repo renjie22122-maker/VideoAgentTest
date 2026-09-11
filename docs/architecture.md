@@ -70,7 +70,8 @@ beginStep/finish   RunController       步骤记账、指纹去重、预算耗�
 - 生成任务的 `submission`（unsent / submitted / unknown）是持久化提交边界：**结果未知的付费提交永不重发**；本地崩溃后，未发送的工作按租约（`leaseExpiresAt`）重排，已提交的按账本中的 provider job id 继续查询；`fal-pending` 标记可被账本真实 ID 接管。**恢复顺序固定：先对账后租约**——账本确认的 ID 先合并进当前状态，旧 unknown/空状态不得覆盖（UPSERT 防降级）；首次提交与恢复共用同一 `submitJob` 入口，提交前检查点是契约而非可选参数。
 - 成本台账：LLM 与媒体提交双入口按文档化估算记录，`observation.projectId` 沿 `roleJSON` 全链传递归属，projects.json 保留有界镜像，`costSummary` 以账本累计为准（不随镜像截断减少）、估算按 4 位小数取整。估算不是发票，真实费率可用环境变量配置。
 - 任务在物化/创建时即写入账本（含 reason 与复核作者），重启后 pending / running / failed / 待复核均可识别；`autoStep` 步首执行 `reconcileRunTasks`。**恢复冲突规则**：账本中"运行中"或"预测提交号超过 run 实际提交数"（完成从未伴随项目落盘）的任务恢复为 failed，绝不静默重执行；项目旧 pending/verification 遇账本终态按上述规则升级，已提交的项目状态不会被账本旧值回退。**提交边界**：任务行记录预测提交号（当前提交数+1），命令处理器仅在项目成功保存后 `markRunCommitted` 递增 run 提交数——账本里的 completed 不能单独证明依赖已满足，必须落在已提交的结果上。JSONL 降级后端按 id 归并最新状态，与 SQLite UPSERT 语义等价（`LEDGER_BACKEND` 可强制后端）。多步计划由 Scheduler 按依赖顺序执行，普通会审不终止整轮，省略岗位的条目按动作能力条件路由。
-- **后台推进**：开发服务器经 `startBackgroundWorker` 周期性推进用户已提交的资产与媒体队列（与请求共用全局写锁，忙时跳拍，`STUDIO_BACKGROUND_WORKER=0` 关闭）；它不启动新工作、不执行 Agent 步骤。Agent 自动协作仍由工作台页面驱动（AutoRunDriver），避免在用户不知情时产生模型调用。
+- **有限并行**：Scheduler 对多个无依赖的只读 review 任务返回 batch 结果，`executeReviewBatch` 在每个任务通过 Policy 门后于项目克隆上并发执行 LLM 会审，报告按顺序串行合并；verify 闸门与全部变更任务（revise / write / design / stop）严格串行——"只读并发、变更串行提交"的分界线由任务 kind 决定，不由提示词约定。重试预算（submission / polling / qualityRepair / llmRepair）与轮询上限使失败路径有界。
+- **后台推进**：开发服务器经 `startBackgroundWorker` 周期性推进用户已提交的资产与媒体队列（按项目加锁、忙时跳拍，`STUDIO_BACKGROUND_WORKER=0` 关闭）；它不启动新工作、不执行 Agent 步骤。Agent 自动协作仍由工作台页面驱动（AutoRunDriver），避免在用户不知情时产生模型调用。
 
 ## 扩展语言服务
 

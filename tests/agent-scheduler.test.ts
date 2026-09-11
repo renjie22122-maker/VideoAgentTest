@@ -268,6 +268,57 @@ void test('a plain scheduled review never completes the run while accepted work 
   assert.equal(run.steps, 2);
 });
 
+void test('independent reviews batch: LLM calls run concurrently and reports merge in order', async (t) => {
+  const old = {
+    STUDIO_DATA_DIR: process.env.STUDIO_DATA_DIR,
+    LLM_BASE_URL: process.env.LLM_BASE_URL,
+    LLM_API_KEY: process.env.LLM_API_KEY,
+    LLM_MODEL: process.env.LLM_MODEL,
+  };
+  Object.assign(process.env, {
+    STUDIO_DATA_DIR: path.join(tmpdir(), 'scheduler-batch-' + Date.now()),
+    LLM_BASE_URL: 'https://scheduler-batch.invalid/v1',
+    LLM_API_KEY: 'test',
+    LLM_MODEL: 'test',
+  });
+  t.after(() => {
+    for (const [key, value] of Object.entries(old))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+  const p2 = project();
+  p2.mode = 'live';
+  p2.plan = demoPlan(p2);
+  p2.production!.script = demoScreenplay(p2);
+  p2.production!.scriptApproved = true;
+  p2.production!.assets = { bible: p2.plan.bible, seed: 42, locked: false };
+  const run = createAutoRun(p2, '会审批次');
+  run.tasks = [
+    { id: 'b1', kind: 'review', status: 'pending', ownerRoleId: 'reviewer', createdBy: 'system', dependsOn: [], targetShotIds: [], reason: '初审', inputVersions: { revision: 1, configRevision: 0 }, attempts: 0, createdAt: 0, updatedAt: 0 },
+    { id: 'b2', kind: 'review', status: 'pending', ownerRoleId: 'continuity', createdBy: 'system', dependsOn: [], targetShotIds: [], reason: '场记复审', inputVersions: { revision: 1, configRevision: 0 }, attempts: 0, createdAt: 0, updatedAt: 0 },
+  ];
+  p2.production!.autoRun = run;
+  let calls = 0;
+  const callLog: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: unknown, init: RequestInit) => {
+    calls++;
+    callLog.push(JSON.parse(init.body as string).model);
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: JSON.stringify({ summary: '未见新增问题', findings: [] }) } }] }),
+    );
+  });
+  await autoStep(p2);
+  assert.equal(calls, 2, 'two reviews = two worker calls, no supervisor call');
+  assert.equal(run.steps, 2);
+  const reports = p2.production!.teamReports ?? [];
+  assert.equal(reports.length, 2);
+  assert.deepEqual(
+    reports.map((r) => r.roleId).sort(),
+    ['continuity', 'reviewer'],
+  );
+  assert.ok(run.tasks!.every((task) => task.status === 'completed'));
+});
+
 void test('a supervisor follow-up plan runs through the scheduler without another planner call', async (t) => {
   const p = project();
   p.mode = 'live';
